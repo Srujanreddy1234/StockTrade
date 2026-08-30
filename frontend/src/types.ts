@@ -107,6 +107,28 @@ export interface LearnTopic {
   invalidation: string[];
 }
 
+export interface Position {
+  id: string;
+  ticker: string;
+  interval: string;
+  direction: string;
+  entry_price: number;
+  target1: number;
+  invalidation: number;
+  entry_date: string;
+  status: string;
+  exit_price: number | null;
+  exit_date: string | null;
+  exit_reason: string | null;
+  return_pct: number | null;
+  unrealized_return_pct: number;
+  display_return_pct: number;
+}
+
+export interface PositionsResponse {
+  positions: Position[];
+}
+
 export interface AnalyzeResponse {
   source: string;
   interval: string;

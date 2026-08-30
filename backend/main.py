@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pandas as pd
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.data_engine.loader import generate_synthetic, load_from_yfinance
@@ -18,6 +18,7 @@ from backend.signals.scoring_engine import add_scores
 from backend.risk.risk_engine import add_risk_levels
 from backend.signals.explanation_engine import explain as explain_row
 from backend.learning.content import list_topics, get_topic
+from backend.positions.position_store import position_store
 
 
 def detect_currency(ticker: str) -> dict | None:
@@ -190,8 +191,6 @@ def analyze(
         try:
             df = load_from_yfinance(ticker=ticker, period=period, interval=interval)
         except Exception as exc:  # yfinance not installed, network, or bad ticker
-            from fastapi import HTTPException
-
             raise HTTPException(
                 status_code=502,
                 detail=(
@@ -201,8 +200,6 @@ def analyze(
                 ),
             )
         if df.empty:
-            from fastapi import HTTPException
-
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -364,7 +361,190 @@ def learn_topic(topic_id: str):
     """Return the full educational content for a single topic."""
     topic = get_topic(topic_id)
     if topic is None:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found.")
     return topic
+
+
+def _fetch_current_price(ticker: str) -> float:
+    """Return the latest available price for a ticker using yfinance."""
+    try:
+        import yfinance as yf
+
+        hist = yf.Ticker(ticker).history(period="1d")
+        if hist.empty:
+            raise ValueError(f"No price data returned for '{ticker}'.")
+        return float(hist["Close"].iloc[-1])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch current price for '{ticker}': {exc}",
+        )
+
+
+def _evaluate_position(position: dict[str, Any], current_price: float) -> dict[str, Any]:
+    """Re-evaluate an open position against current price.
+
+    Returns the position dict (possibly mutated in-place by the store).
+    """
+    if position["status"] != "open":
+        return position
+
+    position_store.update_unrealized(position["id"], current_price)
+
+    if position["direction"] == "bullish":
+        if current_price >= position["target1"]:
+            return position_store.mark_closed_by_system(
+                position["id"], current_price, "target_hit"
+            )
+        if current_price <= position["invalidation"]:
+            return position_store.mark_closed_by_system(
+                position["id"], current_price, "invalidated"
+            )
+    else:
+        if current_price <= position["target1"]:
+            return position_store.mark_closed_by_system(
+                position["id"], current_price, "target_hit"
+            )
+        if current_price >= position["invalidation"]:
+            return position_store.mark_closed_by_system(
+                position["id"], current_price, "invalidated"
+            )
+
+    return position
+
+
+@app.post("/positions/open")
+def open_position(body: dict[str, str]):
+    """Open a new paper position for the most recent analysis row.
+
+    Body must contain ``ticker`` and ``interval``. The pipeline is run
+    against the most recent data; the position is only created if the
+    latest explanation has status ENTRY or WATCH **and** a real
+    bullish/bearish direction.
+    """
+    ticker = body.get("ticker")
+    interval = body.get("interval", "1d")
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Field 'ticker' is required.")
+
+    try:
+        df = load_from_yfinance(ticker=ticker, period="2y", interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}",
+        )
+
+    if df.empty:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No data returned for '{ticker}' ({interval}).",
+        )
+
+    df = run_pipeline(df)
+    last_loc = df.index[-1]
+    explanation = explain_row(df, last_loc)
+
+    status = explanation.get("status")
+    direction = explanation.get("pattern_direction")
+    entry_zone = explanation.get("entry_zone")
+    target1 = explanation.get("target1")
+    invalidation = explanation.get("invalidation")
+    close = explanation.get("close")
+
+    if status not in ("ENTRY", "WATCH") or direction not in ("bullish", "bearish"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot open position: latest status is '{status}' with direction "
+                f"'{direction}'. Positions can only be opened on ENTRY or WATCH "
+                f"setups with a confirmed bullish or bearish direction."
+            ),
+        )
+
+    if not entry_zone or target1 is None or invalidation is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot open position: missing entry zone, target, or invalidation "
+                "level in the latest explanation."
+            ),
+        )
+
+    entry_price = round((entry_zone[0] + entry_zone[1]) / 2, 2)
+
+    position = position_store.create(
+        {
+            "ticker": ticker,
+            "interval": interval,
+            "direction": direction,
+            "entry_price": entry_price,
+            "target1": target1,
+            "invalidation": invalidation,
+        }
+    )
+    return position
+
+
+@app.get("/positions")
+def list_positions():
+    """List all positions with live evaluation for open ones."""
+    positions = position_store.list_all()
+    out = []
+    for pos in positions:
+        current = pos.get("unrealized_return_pct") or 0.0
+        exit_return = pos.get("return_pct")
+        display_return = exit_return if pos["status"] == "closed" else current
+
+        if pos["status"] == "open":
+            try:
+                current_price = _fetch_current_price(pos["ticker"])
+                pos = _evaluate_position(pos, current_price)
+                display_return = pos.get("unrealized_return_pct") or 0.0
+            except Exception:
+                pass
+
+        out.append(
+            {
+                "id": pos["id"],
+                "ticker": pos["ticker"],
+                "interval": pos["interval"],
+                "direction": pos["direction"],
+                "entry_price": pos["entry_price"],
+                "target1": pos["target1"],
+                "invalidation": pos["invalidation"],
+                "entry_date": pos["entry_date"],
+                "status": pos["status"],
+                "exit_price": pos.get("exit_price"),
+                "exit_date": pos.get("exit_date"),
+                "exit_reason": pos.get("exit_reason"),
+                "return_pct": pos.get("return_pct"),
+                "unrealized_return_pct": pos.get("unrealized_return_pct") or 0.0,
+                "display_return_pct": display_return,
+            }
+        )
+    return {"positions": out}
+
+
+@app.post("/positions/{position_id}/close")
+def close_position(position_id: str):
+    """Manually close an open position at the current market price."""
+    position = position_store.get(position_id)
+    if not position:
+        raise HTTPException(status_code=404, detail="Position not found.")
+    if position["status"] != "open":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Position is already {position['status']}.",
+        )
+
+    try:
+        current_price = _fetch_current_price(position["ticker"])
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to fetch current price for '{position['ticker']}': {exc}",
+        )
+
+    closed = position_store.close(position_id, current_price, "manual_close")
+    return closed

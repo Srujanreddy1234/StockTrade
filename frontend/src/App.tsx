@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AnalyzeResponse, LearnTopic, ScanResult, ScanResponse } from './types';
+import type { AnalyzeResponse, LearnTopic, Position, PositionsResponse, ScanResult, ScanResponse } from './types';
 import CandleChart from './CandleChart';
 import './App.css';
 
@@ -47,7 +47,7 @@ function App() {
   const [source, setSource] = useState(() => readLS(LS.source, 'synthetic'));
   const [ticker, setTicker] = useState(() => readLS(LS.ticker, 'RELIANCE.NS'));
   const [intervalVal, setIntervalVal] = useState(() => readLS(LS.interval, '1d'));
-  const [view, setView] = useState<'single' | 'scanner' | 'learn'>('single');
+  const [view, setView] = useState<'single' | 'scanner' | 'learn' | 'positions'>('single');
   const [scanData, setScanData] = useState<ScanResult[] | null>(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -55,6 +55,10 @@ function App() {
   const [learnLoading, setLearnLoading] = useState(false);
   const [learnError, setLearnError] = useState<string | null>(null);
   const [selectedTopic, setSelectedTopic] = useState<LearnTopic | null>(null);
+  const [positions, setPositions] = useState<Position[] | null>(null);
+  const [positionsLoading, setPositionsLoading] = useState(false);
+  const [positionsError, setPositionsError] = useState<string | null>(null);
+  const [openPositionLoading, setOpenPositionLoading] = useState(false);
 
   const fetched = useRef(false);
 
@@ -143,6 +147,64 @@ function App() {
       setLearnError(e instanceof Error ? e.message : String(e));
     } finally {
       setLearnLoading(false);
+    }
+  };
+
+  const fetchPositions = async () => {
+    setPositionsLoading(true);
+    setPositionsError(null);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/positions');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json: PositionsResponse = await res.json();
+      setPositions(json.positions);
+    } catch (e: unknown) {
+      setPositionsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPositionsLoading(false);
+    }
+  };
+
+  const openPosition = async () => {
+    if (!data?.explanation?.active_setup || !data?.ticker) return;
+    setOpenPositionLoading(true);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/positions/open', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ticker: data.ticker,
+          interval: data.interval,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'HTTP ' + res.status }));
+        throw new Error(err.detail || 'HTTP ' + res.status);
+      }
+      await fetchPositions();
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setPositionsError(msg);
+    } finally {
+      setOpenPositionLoading(false);
+    }
+  };
+
+  const closePosition = async (positionId: string) => {
+    setPositionsLoading(true);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/positions/' + positionId + '/close', {
+        method: 'POST',
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'HTTP ' + res.status }));
+        throw new Error(err.detail || 'HTTP ' + res.status);
+      }
+      await fetchPositions();
+    } catch (e: unknown) {
+      setPositionsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPositionsLoading(false);
     }
   };
 
@@ -237,6 +299,9 @@ function App() {
                 <p>{ex.validation_note}</p>
               </div>
             )}
+            <button className="paper-enter-btn" onClick={openPosition} disabled={openPositionLoading}>
+              {openPositionLoading ? 'Entering…' : 'Enter this trade (paper)'}
+            </button>
             <button className="why-btn" onClick={() => setShowWhy((v) => !v)}>
               {showWhy ? 'Hide' : 'Why?'}
             </button>
@@ -518,6 +583,87 @@ function App() {
 
   const presetValue = TICKERS.some((t) => t.ticker === ticker) ? ticker : '';
 
+  const positionReturnColor = (returnPct: number, status: string) => {
+    if (status === 'closed' && returnPct >= 0) return '#16a34a';
+    if (status === 'closed' && returnPct < 0) return '#dc2626';
+    if (returnPct >= 0) return '#16a34a';
+    if (returnPct > -3) return '#ca8a04';
+    return '#dc2626';
+  };
+
+  const renderPositions = () => {
+    if (positionsLoading) return <div className="positions-loading">Loading positions…</div>;
+    if (positionsError) return <div className="error">Error: {positionsError}</div>;
+    if (!positions) return <div className="positions-empty">Press the Positions tab to load.</div>;
+
+    const openPositions = positions.filter((p) => p.status === 'open');
+    const closedPositions = positions.filter((p) => p.status === 'closed');
+
+    const renderCard = (pos: Position) => (
+      <div key={pos.id} className={`position-card ${pos.status}`}>
+        <div className="position-header">
+          <strong>{pos.ticker}</strong>
+          <span className="mini-badge" style={{ background: statusColor(pos.status.toUpperCase()) }}>
+            {pos.status.toUpperCase()}
+          </span>
+        </div>
+        <div className="position-body">
+          <div><span>Direction</span><strong>{pos.direction}</strong></div>
+          <div><span>Entry price</span><strong>{pos.entry_price.toFixed(2)}</strong></div>
+          <div><span>Target</span><strong>{pos.target1?.toFixed(2) ?? '—'}</strong></div>
+          <div><span>Invalidation</span><strong>{pos.invalidation?.toFixed(2) ?? '—'}</strong></div>
+          <div>
+            <span>Return</span>
+            <strong style={{ color: positionReturnColor(pos.display_return_pct, pos.status) }}>
+              {pos.display_return_pct >= 0 ? '+' : ''}{pos.display_return_pct.toFixed(2)}%
+            </strong>
+          </div>
+          {pos.status === 'open' && (
+            <button className="close-btn" onClick={() => closePosition(pos.id)}>
+              Close position
+            </button>
+          )}
+          {pos.status === 'closed' && (
+            <>
+              <div><span>Exit price</span><strong>{pos.exit_price?.toFixed(2) ?? '—'}</strong></div>
+              <div><span>Exit reason</span><strong>{pos.exit_reason}</strong></div>
+              <div><span>Return</span><strong style={{ color: positionReturnColor(pos.return_pct ?? 0, 'closed') }}>
+                {pos.return_pct != null ? (pos.return_pct >= 0 ? '+' : '') + pos.return_pct.toFixed(2) + '%' : '—'}
+              </strong></div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+
+    return (
+      <div className="positions">
+        <div className="paper-warning">
+          This is simulated/paper trading only. No real money is at risk.
+        </div>
+        {openPositions.length > 0 && (
+          <div className="positions-group">
+            <h3>Open positions ({openPositions.length})</h3>
+            <div className="positions-grid">
+              {openPositions.map(renderCard)}
+            </div>
+          </div>
+        )}
+        {closedPositions.length > 0 && (
+          <div className="positions-group">
+            <h3>Closed positions ({closedPositions.length})</h3>
+            <div className="positions-grid">
+              {closedPositions.map(renderCard)}
+            </div>
+          </div>
+        )}
+        {positions.length === 0 && (
+          <div className="positions-empty">No positions yet. Open a trade from the Single-stock view.</div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -549,6 +695,17 @@ function App() {
               }}
             >
               Learn
+            </button>
+            <button
+              className={view === 'positions' ? 'tab active' : 'tab'}
+              onClick={() => {
+                setView('positions');
+                if (!positions && !positionsLoading) {
+                  fetchPositions();
+                }
+              }}
+            >
+              Positions
             </button>
           </div>
 
@@ -617,6 +774,8 @@ function App() {
         <div className="learn">
           {selectedTopic ? renderLearnDetail() : renderLearnMenu()}
         </div>
+      ) : view === 'positions' ? (
+        renderPositions()
       ) : (
         <div className="layout">
           <div className="main-col">
