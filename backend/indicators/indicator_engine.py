@@ -142,7 +142,7 @@ def add_support_resistance(df: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
     df = df.copy()
     if "swing_high" not in df.columns or "swing_low" not in df.columns:
         df = find_swing_points(df, lookback=lookback)
-    if "atr" not in df.columns:
+    if "atr" not in df.columns or "ema" not in df.columns:
         df = add_indicators(df)
 
     high_vals = df["high"].to_numpy()
@@ -179,4 +179,31 @@ def add_support_resistance(df: pd.DataFrame, lookback: int = 5) -> pd.DataFrame:
     df["resistance"] = resists
     df["near_support"] = near_s
     df["near_resistance"] = near_r
+
+    # EMA-based dynamic S/R -- a SECOND, independent source beyond swing
+    # points. In an uptrend the EMA sits below price and acts as dynamic
+    # support; in a downtrend it sits above price and acts as dynamic
+    # resistance. We flag "near the EMA" when price is within 1x ATR of it,
+    # on the relevant side. This is additive: it is OR-ed into the existing
+    # swing-based near_support / near_resistance flags and does NOT alter the
+    # numeric support / resistance ZONE columns used by risk_engine.
+    ema_vals = df["ema"].to_numpy()
+    ema_support = np.zeros(len(df), dtype=bool)
+    ema_resist = np.zeros(len(df), dtype=bool)
+    for i in range(len(df)):
+        e = ema_vals[i]
+        a = atr_vals[i]
+        if np.isnan(e) or np.isnan(a):
+            continue
+        diff = close_vals[i] - e  # >0: price above EMA; <0: price below EMA
+        if 0 <= diff <= a:
+            ema_support[i] = True  # pulled back to EMA from above (uptrend support)
+        if -a <= diff <= 0:
+            ema_resist[i] = True  # bounced off EMA from below (downtrend resistance)
+
+    df["near_ema_support"] = ema_support
+    df["near_ema_resistance"] = ema_resist
+    # Additive: near_support/resistance now true if swing-based OR EMA-based.
+    df["near_support"] = near_s | ema_support
+    df["near_resistance"] = near_r | ema_resist
     return df

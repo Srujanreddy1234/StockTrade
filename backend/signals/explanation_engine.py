@@ -114,10 +114,14 @@ def explain(df: pd.DataFrame, loc) -> dict:
         return None if pd.isna(v) else round(float(v), 2)
 
     pattern_direction = row.get("pattern_direction", direction)
+    # Confidence status as a string (not a plain boolean) so bullish and
+    # bearish can carry different labels: bullish is "provisional" (promising
+    # but not yet statistically conclusive), bearish is "experimental"
+    # (no demonstrated skill), and neutral patterns are null.
     if pattern_direction == "bullish":
-        validated = True
+        validated = "provisional"
     elif pattern_direction == "bearish":
-        validated = False
+        validated = "experimental"
     else:
         validated = None
 

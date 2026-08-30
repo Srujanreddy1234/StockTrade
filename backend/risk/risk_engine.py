@@ -31,6 +31,11 @@ def add_risk_levels(
 
     support = df["support"].astype(float)
     resistance = df["resistance"].astype(float)
+    ema = (
+        df["ema"].astype(float)
+        if "ema" in df.columns
+        else pd.Series(np.nan, index=df.index, dtype=float)
+    )
 
     bull = direction == "bullish"
     bear = direction == "bearish"
@@ -39,8 +44,33 @@ def add_risk_levels(
     target1 = pd.Series(np.nan, index=df.index, dtype=float)
     target2 = pd.Series(np.nan, index=df.index, dtype=float)
 
-    invalidation[bull] = support[bull] - stop_atr_mult * atr[bull]
-    invalidation[bear] = resistance[bear] + stop_atr_mult * atr[bear]
+    # Dynamic (EMA) stop as a second, independent source alongside the
+    # swing-based stop. In an uptrend the nearest swing LOW is often far
+    # below price, making the swing stop excessively distant and collapsing
+    # risk/reward; the EMA (rising) sits much closer and reflects genuine
+    # invalidation. We keep the CLOSER of the two so the stop tracks price.
+    #   bullish: stops are below price -> use the HIGHER (closer) stop
+    #   bearish: stops are above price -> use the LOWER  (closer) stop
+    bull_swing = support - stop_atr_mult * atr
+    bull_ema = ema - stop_atr_mult * atr
+    bear_swing = resistance + stop_atr_mult * atr
+    bear_ema = ema + stop_atr_mult * atr
+
+    both_bull = bull_swing.notna() & bull_ema.notna()
+    both_bear = bear_swing.notna() & bear_ema.notna()
+
+    bull_stop = pd.Series(np.nan, index=df.index, dtype=float)
+    bull_stop[both_bull] = np.maximum(bull_swing[both_bull], bull_ema[both_bull])
+    bull_stop[~both_bull & bull_swing.notna()] = bull_swing[~both_bull & bull_swing.notna()]
+    bull_stop[~both_bull & bull_ema.notna()] = bull_ema[~both_bull & bull_ema.notna()]
+
+    bear_stop = pd.Series(np.nan, index=df.index, dtype=float)
+    bear_stop[both_bear] = np.minimum(bear_swing[both_bear], bear_ema[both_bear])
+    bear_stop[~both_bear & bear_swing.notna()] = bear_swing[~both_bear & bear_swing.notna()]
+    bear_stop[~both_bear & bear_ema.notna()] = bear_ema[~both_bear & bear_ema.notna()]
+
+    invalidation[bull] = bull_stop[bull]
+    invalidation[bear] = bear_stop[bear]
 
     ezh = df["entry_zone_high"]
     ezl = df["entry_zone_low"]
