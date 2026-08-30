@@ -26,7 +26,7 @@ export interface Explanation {
   active_setup: boolean;
   monitoring: boolean;
   message: string | null;
-  validated: boolean | null;
+  validated: string | null;
   validation_note: string | null;
 }
 
@@ -63,6 +63,23 @@ export interface ChartLevels {
 export interface Chart {
   candles: Candle[];
   levels: ChartLevels;
+}
+
+export interface ScanResult {
+  ticker: string;
+  close: number;
+  status: string | null;
+  score: number | null;
+  direction: string | null;
+  validated: string | null;
+  pattern: string | null;
+  currency: Currency | null;
+}
+
+export interface ScanResponse {
+  count: number;
+  skipped: { ticker: string; error: string }[];
+  results: ScanResult[];
 }
 
 export interface Currency {

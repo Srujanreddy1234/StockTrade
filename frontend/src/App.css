@@ -304,6 +304,18 @@ body {
   letter-spacing: 0.05em;
 }
 
+.provisional-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: #0d9488;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
 .validation-note {
   padding: 12px;
   border-radius: 8px;
@@ -453,4 +465,108 @@ body {
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Live Scanner view */
+.view-toggle {
+  display: inline-flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.view-toggle .tab {
+  padding: 7px 14px;
+  border: none;
+  background: var(--card-bg);
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.view-toggle .tab.active {
+  background: #1f2937;
+  color: #fff;
+}
+
+.scanner {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 16px 20px;
+}
+
+.scanner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.scanner-head h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.scanner-head button {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.scanner-head button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.scanner-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.scan-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.scan-table th,
+.scan-table td {
+  padding: 10px 12px;
+  text-align: left;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.scan-table th {
+  background: #f9fafb;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.scan-table tr:last-child td {
+  border-bottom: none;
+}
+
+.scan-row {
+  cursor: pointer;
+}
+
+.scan-row:hover {
+  background: #f8fafc;
+}
+
+.muted {
+  color: var(--text-secondary);
+  font-size: 11px;
 }

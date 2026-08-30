@@ -53,6 +53,23 @@ export default function CandleChart({ candles, levels }: Props) {
     VOL_BOTTOM - (v / maxVol) * (VOL_BOTTOM - VOL_TOP);
   const xCenter = (i: number) => PAD_X + slot * i + slot / 2;
 
+  // De-collide level labels: when two levels are close in price their labels
+  // overlap. Keep each line at its true price position, but nudge the text
+  // baselines apart so every label stays readable.
+  const MIN_LEVEL_GAP = 14;
+  const labelPositions = levelDefs
+    .map((l) => ({ l, y: priceY(l.value as number) }))
+    .sort((a, b) => a.y - b.y)
+    .reduce<{ l: LevelDef; y: number }[]>((acc, cur) => {
+      const prev = acc[acc.length - 1];
+      if (prev && cur.y - prev.y < MIN_LEVEL_GAP) {
+        acc.push({ l: cur.l, y: prev.y + MIN_LEVEL_GAP });
+      } else {
+        acc.push(cur);
+      }
+      return acc;
+    }, []);
+
   const emaPoints = candles
     .map((c, i) => (c.ema != null ? `${xCenter(i)},${priceY(c.ema)}` : null))
     .filter((p): p is string => p != null);
@@ -82,23 +99,23 @@ export default function CandleChart({ candles, levels }: Props) {
           );
         })}
 
-        {/* level lines */}
-        {levelDefs.map((l, i) => {
-          const y = priceY(l.value as number);
+        {/* level lines + de-collided labels */}
+        {labelPositions.map((p, i) => {
+          const lineY = priceY(p.l.value as number);
           return (
             <g key={i}>
               <line
                 x1={0}
-                y1={y}
+                y1={lineY}
                 x2={W}
-                y2={y}
-                stroke={l.color}
+                y2={lineY}
+                stroke={p.l.color}
                 strokeWidth={1}
                 strokeDasharray="5 4"
                 opacity={0.8}
               />
-              <text x={4} y={y - 3} fill={l.color} className="level-label">
-                {l.label} {l.value?.toFixed(2)}
+              <text x={4} y={p.y - 3} fill={p.l.color} className="level-label">
+                {p.l.label} {p.l.value?.toFixed(2)}
               </text>
             </g>
           );

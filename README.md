@@ -236,7 +236,7 @@ Runs the full pipeline and returns the latest setup plus a 30-candle history.
     "risk_reward_note": "risk/reward acceptable ✓ (1:1.5)",
     "status_reason": null,
     "status": "WATCH",
-    "validated": false,
+    "validated": "experimental",
     "active_setup": true,
     "monitoring": false,
     "validation_note": "Bearish signals are still experimental -- backtesting across 40 stocks and 5 years showed no reliable directional accuracy for this signal type yet. Bullish signals have not yet been validated at the same scale."
@@ -274,8 +274,8 @@ Runs the full pipeline and returns the latest setup plus a 30-candle history.
 
 | Signal Type | Validation Status |
 |-------------|-------------------|
-| **Bullish** | Marked as `validated: true` in the explanation engine, but the backend note says *"Bullish signals have not yet been validated at the same scale"* as bearish. |
-| **Bearish** | `validated: false`. The backend attaches a `validation_note`: *"Bearish signals are still experimental -- backtesting across 40 stocks and 5 years showed no reliable directional accuracy for this signal type yet."* |
+| **Bullish** | `validated: "provisional"`. The backend attaches a `validation_note`: *"Backtesting shows promising directional accuracy (48% on held-out data vs a 25% baseline), but sample size is still limited. Treat as provisional, not proven."* |
+| **Bearish** | `validated: "experimental"`. The backend attaches a `validation_note`: *"Bearish signals are still experimental -- backtesting across 40 stocks and 5 years showed no reliable directional accuracy for this signal type yet."* |
 | **WATCH / no pattern** | Treated as monitoring; no validation note unless bearish. |
 
 The backtesting scripts (`run_walk_forward_basket.py`) are the validation harness. They run walk-forward backtests across ~40 NSE tickers (5 years daily) and evaluate WATCH rows by checking if price moved in the signaled direction by >1× ATR within the next 10 candles.

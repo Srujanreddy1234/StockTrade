@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AnalyzeResponse } from './types';
+import type { AnalyzeResponse, ScanResult, ScanResponse } from './types';
 import CandleChart from './CandleChart';
 import './App.css';
 
@@ -47,23 +47,34 @@ function App() {
   const [source, setSource] = useState(() => readLS(LS.source, 'synthetic'));
   const [ticker, setTicker] = useState(() => readLS(LS.ticker, 'RELIANCE.NS'));
   const [intervalVal, setIntervalVal] = useState(() => readLS(LS.interval, '1d'));
+  const [view, setView] = useState<'single' | 'scanner'>('single');
+  const [scanData, setScanData] = useState<ScanResult[] | null>(null);
+  const [scanLoading, setScanLoading] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
 
   const fetched = useRef(false);
 
-  const fetchData = async () => {
+  const fetchData = async (overrides?: {
+    source?: string;
+    ticker?: string;
+    interval?: string;
+  }) => {
+    const src = overrides?.source ?? source;
+    const tk = overrides?.ticker ?? ticker;
+    const iv = overrides?.interval ?? intervalVal;
     setLoading(true);
     setError(null);
     setStale(false);
     try {
       const params = new URLSearchParams();
-      if (source === 'yfinance') {
-        params.set('ticker', ticker);
-        params.set('interval', intervalVal);
+      if (src === 'yfinance') {
+        params.set('ticker', tk);
+        params.set('interval', iv);
       }
       const url =
-        source === 'synthetic'
+        src === 'synthetic'
           ? API_URL
-          : 'http://127.0.0.1:8000/analyze/' + source + '?' + params.toString();
+          : 'http://127.0.0.1:8000/analyze/' + src + '?' + params.toString();
       const res = await fetch(url);
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json: AnalyzeResponse = await res.json();
@@ -81,6 +92,33 @@ function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const fetchScan = async () => {
+    setScanLoading(true);
+    setScanError(null);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/scan');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json: ScanResponse = await res.json();
+      setScanData(json.results);
+      const skipped = json.skipped?.length ?? 0;
+      setScanError(skipped ? `${skipped} ticker(s) skipped (see console)` : null);
+      if (skipped) console.warn('Scanner skipped:', json.skipped);
+    } catch (e: unknown) {
+      setScanError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setScanLoading(false);
+    }
+  };
+
+  // Clicking a scanner row loads that ticker into the single-stock view.
+  const openTicker = (t: string) => {
+    setSource('yfinance');
+    setTicker(t);
+    setIntervalVal('1d');
+    setView('single');
+    fetchData({ source: 'yfinance', ticker: t, interval: '1d' });
   };
 
   // Persist selections so a page refresh keeps the inputs and only the
@@ -128,7 +166,10 @@ function App() {
               {ex.status}
             </span>
             <span className="score">{ex.score}/100</span>
-            {ex.pattern_direction === 'bearish' && (
+            {ex.validated === 'provisional' && (
+              <span className="provisional-badge">Provisional</span>
+            )}
+            {ex.validated === 'experimental' && (
               <span className="experimental-badge">Experimental</span>
             )}
           </div>
@@ -173,7 +214,10 @@ function App() {
               {ex.status}
             </span>
             <span className="score">{ex.score}/100</span>
-            {ex.pattern_direction === 'bearish' && (
+            {ex.validated === 'provisional' && (
+              <span className="provisional-badge">Provisional</span>
+            )}
+            {ex.validated === 'experimental' && (
               <span className="experimental-badge">Experimental</span>
             )}
           </div>
@@ -267,6 +311,71 @@ function App() {
     );
   };
 
+  const renderScanner = () => {
+    return (
+      <div className="scanner">
+        <div className="scanner-head">
+          <h3>Live Scanner — ranked by setup score</h3>
+          <button onClick={fetchScan} disabled={scanLoading}>
+            {scanLoading ? 'Scanning…' : 'Rescan'}
+          </button>
+        </div>
+        {scanError && !scanLoading && <div className="error">Error: {scanError}</div>}
+        {!scanData && !scanLoading && (
+          <div className="scanner-empty">Press Rescan to load today's best setups.</div>
+        )}
+        {scanData && scanData.length === 0 && (
+          <div className="scanner-empty">No tickers returned a usable setup.</div>
+        )}
+        {scanData && scanData.length > 0 && (
+          <table className="scan-table">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th>Close</th>
+                <th>Status</th>
+                <th>Score</th>
+                <th>Pattern</th>
+                <th>Confidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {scanData.map((r) => (
+                <tr key={r.ticker} className="scan-row" onClick={() => openTicker(r.ticker)}>
+                  <td>{r.ticker}</td>
+                  <td>
+                    {r.currency?.symbol ?? ''}
+                    {r.close != null ? r.close.toFixed(2) : '—'}{' '}
+                    <span className="muted">{r.currency?.code ?? ''}</span>
+                  </td>
+                  <td>
+                    <span
+                      className="mini-badge"
+                      style={{ background: statusColor(r.status ?? '') }}
+                    >
+                      {r.status}
+                    </span>
+                  </td>
+                  <td>{r.score != null ? r.score : '—'}</td>
+                  <td>{r.pattern ?? '—'}</td>
+                  <td>
+                    {r.validated === 'provisional' && (
+                      <span className="provisional-badge">Provisional</span>
+                    )}
+                    {r.validated === 'experimental' && (
+                      <span className="experimental-badge">Experimental</span>
+                    )}
+                    {!r.validated && '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    );
+  };
+
   const presetValue = TICKERS.some((t) => t.ticker === ticker) ? ticker : '';
 
   return (
@@ -274,51 +383,73 @@ function App() {
       <header className="topbar">
         <h1>Trade Assistant</h1>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-          <select
-            value={source}
-            onChange={(e) => setSource(e.target.value)}
-            style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)' }}
-          >
-            <option value="synthetic">Synthetic</option>
-            <option value="yfinance">yfinance</option>
-          </select>
-          {source === 'yfinance' && (
+          <div className="view-toggle">
+            <button
+              className={view === 'single' ? 'tab active' : 'tab'}
+              onClick={() => setView('single')}
+            >
+              Single
+            </button>
+            <button
+              className={view === 'scanner' ? 'tab active' : 'tab'}
+              onClick={() => {
+                setView('scanner');
+                fetchScan();
+              }}
+            >
+              Scanner
+            </button>
+          </div>
+
+          {view === 'single' && (
             <>
               <select
-                value={presetValue}
-                onChange={(e) => setTicker(e.target.value)}
-                style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', maxWidth: 180 }}
-                title="Preset tickers"
-              >
-                <option value="" disabled>
-                  Market ▾
-                </option>
-                {TICKERS.map((t) => (
-                  <option key={t.ticker} value={t.ticker}>
-                    {t.flag} {t.market} — {t.ticker}
-                  </option>
-                ))}
-              </select>
-              <input
-                value={ticker}
-                onChange={(e) => setTicker(e.target.value)}
-                placeholder="Ticker"
-                style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', width: 110 }}
-              />
-              <select
-                value={intervalVal}
-                onChange={(e) => setIntervalVal(e.target.value)}
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
                 style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)' }}
               >
-                <option value="15m">15m</option>
-                <option value="1h">1h</option>
-                <option value="1d">1d</option>
+                <option value="synthetic">Synthetic</option>
+                <option value="yfinance">yfinance</option>
               </select>
+              {source === 'yfinance' && (
+                <>
+                  <select
+                    value={presetValue}
+                    onChange={(e) => setTicker(e.target.value)}
+                    style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', maxWidth: 180 }}
+                    title="Preset tickers"
+                  >
+                    <option value="" disabled>
+                      Market ▾
+                    </option>
+                    {TICKERS.map((t) => (
+                      <option key={t.ticker} value={t.ticker}>
+                        {t.flag} {t.market} — {t.ticker}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    value={ticker}
+                    onChange={(e) => setTicker(e.target.value)}
+                    placeholder="Ticker"
+                    style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', width: 110 }}
+                  />
+                  <select
+                    value={intervalVal}
+                    onChange={(e) => setIntervalVal(e.target.value)}
+                    style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)' }}
+                  >
+                    <option value="15m">15m</option>
+                    <option value="1h">1h</option>
+                    <option value="1d">1d</option>
+                  </select>
+                </>
+              )}
+              <button onClick={() => fetchData()} disabled={loading}>
+                {loading ? 'Refreshing…' : 'Refresh'}
+              </button>
             </>
           )}
-          <button onClick={fetchData} disabled={loading}>
-            {loading ? 'Refreshing…' : 'Refresh'}
-          </button>
         </div>
       </header>
 
@@ -329,19 +460,23 @@ function App() {
         </div>
       )}
 
-      <div className="layout">
-        <div className="main-col">
-          {renderExplanation()}
+      {view === 'scanner' ? (
+        renderScanner()
+      ) : (
+        <div className="layout">
+          <div className="main-col">
+            {renderExplanation()}
 
-          {data?.chart && (
-            <CandleChart candles={data.chart.candles} levels={data.chart.levels} />
-          )}
+            {data?.chart && (
+              <CandleChart candles={data.chart.candles} levels={data.chart.levels} />
+            )}
 
-          {renderHistory()}
+            {renderHistory()}
+          </div>
+
+          <aside className="news-col">{renderNews()}</aside>
         </div>
-
-        <aside className="news-col">{renderNews()}</aside>
-      </div>
+      )}
     </div>
   );
 }
