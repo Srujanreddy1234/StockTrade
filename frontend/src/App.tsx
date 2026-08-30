@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AnalyzeResponse, ScanResult, ScanResponse } from './types';
+import type { AnalyzeResponse, LearnTopic, ScanResult, ScanResponse } from './types';
 import CandleChart from './CandleChart';
 import './App.css';
 
@@ -47,10 +47,14 @@ function App() {
   const [source, setSource] = useState(() => readLS(LS.source, 'synthetic'));
   const [ticker, setTicker] = useState(() => readLS(LS.ticker, 'RELIANCE.NS'));
   const [intervalVal, setIntervalVal] = useState(() => readLS(LS.interval, '1d'));
-  const [view, setView] = useState<'single' | 'scanner'>('single');
+  const [view, setView] = useState<'single' | 'scanner' | 'learn'>('single');
   const [scanData, setScanData] = useState<ScanResult[] | null>(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [learnTopics, setLearnTopics] = useState<LearnTopic[] | null>(null);
+  const [learnLoading, setLearnLoading] = useState(false);
+  const [learnError, setLearnError] = useState<string | null>(null);
+  const [selectedTopic, setSelectedTopic] = useState<LearnTopic | null>(null);
 
   const fetched = useRef(false);
 
@@ -109,6 +113,36 @@ function App() {
       setScanError(e instanceof Error ? e.message : String(e));
     } finally {
       setScanLoading(false);
+    }
+  };
+
+  const fetchLearnTopics = async () => {
+    setLearnLoading(true);
+    setLearnError(null);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/learn');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      setLearnTopics(json.topics);
+    } catch (e: unknown) {
+      setLearnError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLearnLoading(false);
+    }
+  };
+
+  const openLearnTopic = async (topicId: string) => {
+    setLearnLoading(true);
+    setLearnError(null);
+    try {
+      const res = await fetch('http://127.0.0.1:8000/learn/' + topicId);
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json: LearnTopic = await res.json();
+      setSelectedTopic(json);
+    } catch (e: unknown) {
+      setLearnError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLearnLoading(false);
     }
   };
 
@@ -177,6 +211,17 @@ function App() {
             <p className="price">Close: {fmtPrice(ex.close)}</p>
             <p className="pattern-line">
               <strong>{ex.pattern || '—'}</strong> ({ex.pattern_direction})
+              {ex.pattern && (
+                <button
+                  className="learn-link"
+                  onClick={() => {
+                    setView('learn');
+                    openLearnTopic(ex.pattern as string);
+                  }}
+                >
+                  Learn about this pattern
+                </button>
+              )}
             </p>
             <p className="description">{ex.pattern_description}</p>
             <p className="meta">Trend: {ex.trend}</p>
@@ -223,6 +268,20 @@ function App() {
           </div>
           <div className="card-body">
             <p className="price">Close: {fmtPrice(ex.close)}</p>
+            {ex.pattern && (
+              <p className="pattern-line">
+                <strong>{ex.pattern}</strong> ({ex.pattern_direction})
+                <button
+                  className="learn-link"
+                  onClick={() => {
+                    setView('learn');
+                    openLearnTopic(ex.pattern as string);
+                  }}
+                >
+                  Learn about this pattern
+                </button>
+              </p>
+            )}
             <p className="meta">Trend: {ex.trend}</p>
             <p className="monitor-msg">{ex.message}</p>
             {ex.validation_note && (
@@ -245,6 +304,20 @@ function App() {
         </div>
         <div className="card-body">
           <p className="price">Close: {ex.close.toFixed(2)}</p>
+          {ex.pattern && (
+            <p className="pattern-line">
+              <strong>{ex.pattern}</strong> ({ex.pattern_direction})
+              <button
+                className="learn-link"
+                onClick={() => {
+                  setView('learn');
+                  openLearnTopic(ex.pattern as string);
+                }}
+              >
+                Learn about this pattern
+              </button>
+            </p>
+          )}
           <p className="no-trade-msg">No trade — insufficient confirmation</p>
         </div>
       </div>
@@ -376,6 +449,73 @@ function App() {
     );
   };
 
+  const renderLearnMenu = () => {
+    if (learnLoading) return <div className="learn-loading">Loading topics…</div>;
+    if (learnError) return <div className="error">Error: {learnError}</div>;
+    if (!learnTopics) return <div className="learn-empty">Press the Learn tab to load topics.</div>;
+    const patterns = learnTopics.filter((t) => t.direction !== null);
+    const concepts = learnTopics.filter((t) => t.direction === null);
+    const renderGroup = (label: string, items: LearnTopic[]) => (
+      <div className="learn-group">
+        <h4>{label}</h4>
+        <ul className="learn-list">
+          {items.map((t) => (
+            <li key={t.id} className="learn-list-item" onClick={() => openLearnTopic(t.id)}>
+              <strong>{t.title}</strong>
+              <span>{t.teaser}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+    return (
+      <div className="learn-menu">
+        {patterns.length > 0 && renderGroup('Candlestick Patterns', patterns)}
+        {concepts.length > 0 && renderGroup('Core Concepts', concepts)}
+      </div>
+    );
+  };
+
+  const renderLearnDetail = () => {
+    if (!selectedTopic) return null;
+    const bulletList = (items: string[]) => (
+      <ul>
+        {items.map((item, i) => (
+          <li key={i}>{item}</li>
+        ))}
+      </ul>
+    );
+    return (
+      <div className="learn-detail">
+        <button className="learn-back" onClick={() => setSelectedTopic(null)}>
+          ← Back to topics
+        </button>
+        <h3>{selectedTopic.title}</h3>
+        <p className="learn-teaser">{selectedTopic.teaser}</p>
+        <div className="learn-section">
+          <h4>What is it</h4>
+          <p>{selectedTopic.what_is_it}</p>
+        </div>
+        <div className="learn-section">
+          <h4>Why it matters</h4>
+          <p>{selectedTopic.why_it_matters}</p>
+        </div>
+        <div className="learn-section">
+          <h4>How is it detected</h4>
+          <p>{selectedTopic.how_is_it_detected}</p>
+        </div>
+        <div className="learn-section">
+          <h4>Confirmation</h4>
+          {bulletList(selectedTopic.confirmation)}
+        </div>
+        <div className="learn-section">
+          <h4>Invalidation</h4>
+          {bulletList(selectedTopic.invalidation)}
+        </div>
+      </div>
+    );
+  };
+
   const presetValue = TICKERS.some((t) => t.ticker === ticker) ? ticker : '';
 
   return (
@@ -398,6 +538,17 @@ function App() {
               }}
             >
               Scanner
+            </button>
+            <button
+              className={view === 'learn' ? 'tab active' : 'tab'}
+              onClick={() => {
+                setView('learn');
+                if (!learnTopics && !learnLoading) {
+                  fetchLearnTopics();
+                }
+              }}
+            >
+              Learn
             </button>
           </div>
 
@@ -462,6 +613,10 @@ function App() {
 
       {view === 'scanner' ? (
         renderScanner()
+      ) : view === 'learn' ? (
+        <div className="learn">
+          {selectedTopic ? renderLearnDetail() : renderLearnMenu()}
+        </div>
       ) : (
         <div className="layout">
           <div className="main-col">

@@ -17,6 +17,7 @@ from backend.indicators.indicator_engine import (
 from backend.signals.scoring_engine import add_scores
 from backend.risk.risk_engine import add_risk_levels
 from backend.signals.explanation_engine import explain as explain_row
+from backend.learning.content import list_topics, get_topic
 
 
 def detect_currency(ticker: str) -> dict | None:
@@ -350,3 +351,20 @@ def scan():
         "skipped": skipped,
         "results": results,
     }
+
+
+@app.get("/learn")
+def learn_topics():
+    """Return a list of all available Learn topics (id, title, teaser)."""
+    return {"topics": list_topics()}
+
+
+@app.get("/learn/{topic_id}")
+def learn_topic(topic_id: str):
+    """Return the full educational content for a single topic."""
+    topic = get_topic(topic_id)
+    if topic is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found.")
+    return topic

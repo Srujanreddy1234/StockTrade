@@ -570,3 +570,147 @@ body {
   color: var(--text-secondary);
   font-size: 11px;
 }
+
+/* Learn section */
+.learn {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 16px 20px;
+}
+
+.learn-loading,
+.learn-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.learn-group {
+  margin-bottom: 16px;
+}
+
+.learn-group h4 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.learn-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.learn-list-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid #f3f4f6;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.learn-list-item:last-child {
+  border-bottom: none;
+}
+
+.learn-list-item:hover {
+  background: #f8fafc;
+}
+
+.learn-list-item strong {
+  display: block;
+  margin-bottom: 2px;
+  color: var(--text);
+}
+
+.learn-list-item span {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.learn-back {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: #f9fafb;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+
+.learn-back:hover {
+  background: #f3f4f6;
+}
+
+.learn-detail h3 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.learn-teaser {
+  margin: 0 0 16px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.learn-section {
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f3f4f6;
+}
+
+.learn-section:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.learn-section h4 {
+  margin: 0 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.learn-section p {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+.learn-section ul {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.learn-section li {
+  margin-bottom: 4px;
+}
+
+.learn-link {
+  margin-left: 10px;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: #f0f9ff;
+  color: #0369a1;
+  font-size: 12px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.learn-link:hover {
+  background: #e0f2fe;
+}

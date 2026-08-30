@@ -95,6 +95,18 @@ export interface NewsItem {
   published: number | null;
 }
 
+export interface LearnTopic {
+  id: string;
+  title: string;
+  teaser: string;
+  direction: string | null;
+  what_is_it: string;
+  why_it_matters: string;
+  how_is_it_detected: string;
+  confirmation: string[];
+  invalidation: string[];
+}
+
 export interface AnalyzeResponse {
   source: string;
   interval: string;
