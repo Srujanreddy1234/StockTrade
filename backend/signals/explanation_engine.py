@@ -131,6 +131,8 @@ def explain(df: pd.DataFrame, loc) -> dict:
         "pattern": pattern,
         "pattern_direction": pattern_direction,
         "pattern_description": description,
+        "chart_pattern": row.get("chart_pattern"),
+        "chart_pattern_direction": row.get("chart_pattern_direction"),
         "trend": trend,
         "trend_agrees": trend_agrees,
         "trend_note": trend_note,

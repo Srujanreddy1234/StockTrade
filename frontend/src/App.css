@@ -715,6 +715,17 @@ body {
   background: #e0f2fe;
 }
 
+.chart-pattern-line {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px dashed #e5e7eb;
+  font-size: 13px;
+}
+
+.chart-pattern-line strong {
+  color: #6b7280;
+}
+
 /* Positions section */
 .positions {
   background: var(--card-bg);

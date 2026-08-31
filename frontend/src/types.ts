@@ -4,6 +4,8 @@ export interface Explanation {
   pattern: string | null;
   pattern_direction: string;
   pattern_description: string;
+  chart_pattern: string | null;
+  chart_pattern_direction: string | null;
   trend: string;
   trend_agrees: boolean | null;
   trend_note: string;

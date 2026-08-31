@@ -12,6 +12,7 @@ from backend.learning.content import list_topics, get_topic
 from backend.positions.position_store import position_store
 from backend.pipeline import run_pipeline
 from backend.multi_timeframe.mtf_engine import check_alignment
+from backend.chart_patterns.chart_pattern_engine import detect_chart_patterns
 
 
 def detect_currency(ticker: str) -> dict | None:
@@ -193,9 +194,13 @@ def analyze(
         )
 
     df = run_pipeline(df)
+    df = detect_chart_patterns(df)
 
     last_loc = df.index[-1]
     explanation = explain_row(df, last_loc)
+
+    explanation["chart_pattern"] = df.at[last_loc, "chart_pattern"]
+    explanation["chart_pattern_direction"] = df.at[last_loc, "chart_pattern_direction"]
 
     status = explanation.get("status")
     has_direction = explanation.get("pattern_direction") in ("bullish", "bearish")

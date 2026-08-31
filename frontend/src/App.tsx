@@ -272,7 +272,7 @@ function App() {
           <div className="card-body">
             <p className="price">Close: {fmtPrice(ex.close)}</p>
             <p className="pattern-line">
-              <strong>{ex.pattern || '—'}</strong> ({ex.pattern_direction})
+              <strong>Candle pattern: {ex.pattern || '—'}</strong> ({ex.pattern_direction})
               {ex.pattern && (
                 <button
                   className="learn-link"
@@ -285,6 +285,20 @@ function App() {
                 </button>
               )}
             </p>
+            {ex.chart_pattern && (
+              <p className="pattern-line chart-pattern-line">
+                <strong>Chart pattern: {ex.chart_pattern}</strong> ({ex.chart_pattern_direction})
+                <button
+                  className="learn-link"
+                  onClick={() => {
+                    setView('learn');
+                    openLearnTopic(ex.chart_pattern as string);
+                  }}
+                >
+                  Learn about this pattern
+                </button>
+              </p>
+            )}
             <p className="description">{ex.pattern_description}</p>
             <p className="meta">Trend: {ex.trend}</p>
             <div className="levels">
@@ -347,6 +361,20 @@ function App() {
                 </button>
               </p>
             )}
+            {ex.chart_pattern && (
+              <p className="pattern-line chart-pattern-line">
+                <strong>Chart pattern: {ex.chart_pattern}</strong> ({ex.chart_pattern_direction})
+                <button
+                  className="learn-link"
+                  onClick={() => {
+                    setView('learn');
+                    openLearnTopic(ex.chart_pattern as string);
+                  }}
+                >
+                  Learn about this pattern
+                </button>
+              </p>
+            )}
             <p className="meta">Trend: {ex.trend}</p>
             <p className="monitor-msg">{ex.message}</p>
             {ex.validation_note && (
@@ -377,6 +405,20 @@ function App() {
                 onClick={() => {
                   setView('learn');
                   openLearnTopic(ex.pattern as string);
+                }}
+              >
+                Learn about this pattern
+              </button>
+            </p>
+          )}
+          {ex.chart_pattern && (
+            <p className="pattern-line chart-pattern-line">
+              <strong>Chart pattern: {ex.chart_pattern}</strong> ({ex.chart_pattern_direction})
+              <button
+                className="learn-link"
+                onClick={() => {
+                  setView('learn');
+                  openLearnTopic(ex.chart_pattern as string);
                 }}
               >
                 Learn about this pattern

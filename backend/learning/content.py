@@ -280,6 +280,133 @@ _PATTERNS = {
     },
 }
 
+_CHART_PATTERNS = {
+    "double_top": {
+        "id": "double_top",
+        "title": "Double Top",
+        "teaser": "Two similar swing highs separated by a swing low, often signaling a bearish reversal.",
+        "direction": "bearish",
+        "what_is_it": (
+            "A double top is a reversal pattern where price hits a resistance level twice, "
+            "with a swing low in between. The second peak is roughly level with the first "
+            "(within ~1.5%), and the 'neckline' is that middle swing low."
+        ),
+        "why_it_matters": (
+            "It shows buyers tried to push price higher twice but failed both times. "
+            "When price breaks below the neckline, it suggests the rally is exhausted "
+            "and a downtrend may follow."
+        ),
+        "how_is_it_detected": (
+            "The engine scans for two recent swing highs within ~1.5% of each other, "
+            "with a swing low between them. It then checks whether the latest price has "
+            "broken below that middle swing low (the neckline)."
+        ),
+        "confirmation": [
+            "Price closes decisively below the neckline (the swing low between the two peaks).",
+            "Volume is higher on the breakdown candle than on the peaks.",
+            "The breakdown holds for at least one or two candles after the break.",
+        ],
+        "invalidation": [
+            "Price bounces back above the neckline quickly -- the breakdown was a false signal.",
+            "The two peaks are more than ~1.5% apart, so they are not truly 'double'.",
+            "No clear swing low exists between the peaks, so there is no neckline to break.",
+        ],
+    },
+    "double_bottom": {
+        "id": "double_bottom",
+        "title": "Double Bottom",
+        "teaser": "Two similar swing lows separated by a swing high, often signaling a bullish reversal.",
+        "direction": "bullish",
+        "what_is_it": (
+            "A double bottom is the mirror image of a double top. Price hits a support "
+            "level twice, with a swing high in between. The second trough is roughly level "
+            "with the first, and the 'neckline' is that middle swing high."
+        ),
+        "why_it_matters": (
+            "It shows sellers tried to push price lower twice but failed both times. "
+            "When price breaks above the neckline, it suggests the downtrend is exhausted "
+            "and an uptrend may follow."
+        ),
+        "how_is_it_detected": (
+            "The engine scans for two recent swing lows within ~1.5% of each other, "
+            "with a swing high between them. It then checks whether the latest price has "
+            "broken above that middle swing high (the neckline)."
+        ),
+        "confirmation": [
+            "Price closes decisively above the neckline (the swing high between the two troughs).",
+            "Volume is higher on the breakout candle than on the troughs.",
+            "The breakout holds for at least one or two candles after the break.",
+        ],
+        "invalidation": [
+            "Price falls back below the neckline quickly -- the breakout was a false signal.",
+            "The two troughs are more than ~1.5% apart, so they are not truly 'double'.",
+            "No clear swing high exists between the troughs, so there is no neckline to break.",
+        ],
+    },
+    "ascending_triangle": {
+        "id": "ascending_triangle",
+        "title": "Ascending Triangle",
+        "teaser": "A flat resistance level with rising swing lows beneath it -- a bullish continuation pattern.",
+        "direction": "bullish",
+        "what_is_it": (
+            "An ascending triangle forms when price is contained by a horizontal resistance "
+            "level (two or more swing highs at roughly the same price) while swing lows "
+            "below it keep rising. The range converges into a triangle shape."
+        ),
+        "why_it_matters": (
+            "It shows buyers are stepping in at higher and higher prices, but sellers "
+            "are consistently defending the same ceiling. The tension usually resolves "
+            "with a breakout above resistance."
+        ),
+        "how_is_it_detected": (
+            "The engine looks for 2+ recent swing highs within ~1.5% of each other "
+            "(flat top) and at least 2 swing lows between them that are rising "
+            "(each low is higher than the previous one)."
+        ),
+        "confirmation": [
+            "Price breaks above the flat resistance level on above-average volume.",
+            "The breakout candle closes firmly above the resistance, not just a wick.",
+            "The rising lows sequence has at least 3 distinct higher lows.",
+        ],
+        "invalidation": [
+            "Price fails to break resistance and instead breaks below the most recent rising low.",
+            "The 'flat' highs are more than ~1.5% apart, so resistance is not actually flat.",
+            "The lows are not actually rising -- they are flat or falling.",
+        ],
+    },
+    "descending_triangle": {
+        "id": "descending_triangle",
+        "title": "Descending Triangle",
+        "teaser": "A flat support level with falling swing highs above it -- a bearish continuation pattern.",
+        "direction": "bearish",
+        "what_is_it": (
+            "A descending triangle is the mirror of an ascending triangle. Price is contained "
+            "by a horizontal support level (two or more swing lows at roughly the same price) "
+            "while swing highs above it keep falling. The range converges downward."
+        ),
+        "why_it_matters": (
+            "It shows sellers are stepping in at lower and lower prices, but buyers "
+            "are consistently defending the same floor. The tension usually resolves "
+            "with a breakdown below support."
+        ),
+        "how_is_it_detected": (
+            "The engine looks for 2+ recent swing lows within ~1.5% of each other "
+            "(flat bottom) and at least 2 swing highs between them that are falling "
+            "(each high is lower than the previous one)."
+        ),
+        "confirmation": [
+            "Price breaks below the flat support level on above-average volume.",
+            "The breakdown candle closes firmly below the support, not just a wick.",
+            "The falling highs sequence has at least 3 distinct lower highs.",
+        ],
+        "invalidation": [
+            "Price fails to break support and instead rallies above the most recent falling high.",
+            "The 'flat' lows are more than ~1.5% apart, so support is not actually flat.",
+            "The highs are not actually falling -- they are flat or rising.",
+        ],
+    },
+}
+
 _CORE_CONCEPTS = {
     "trend": {
         "id": "trend",
@@ -472,7 +599,7 @@ _CORE_CONCEPTS = {
     },
 }
 
-LEARN_CONTENT: dict[str, dict] = {**_PATTERNS, **_CORE_CONCEPTS}
+LEARN_CONTENT: dict[str, dict] = {**_PATTERNS, **_CHART_PATTERNS, **_CORE_CONCEPTS}
 
 
 def list_topics() -> list[dict]:
