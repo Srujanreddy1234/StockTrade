@@ -139,4 +139,14 @@ export interface AnalyzeResponse {
   explanation: Explanation;
   history: HistoryRow[];
   chart: Chart;
+  alignment: AlignmentResult | null;
+}
+
+export interface AlignmentResult {
+  ticker: string;
+  daily_trend: string | null;
+  hourly_trend: string | null;
+  m15_trend: string | null;
+  alignment: string | null;
+  note: string;
 }

@@ -591,6 +591,34 @@ function App() {
     return '#dc2626';
   };
 
+  const alignmentColor = (alignment: string | null) => {
+    if (alignment === 'strong_bullish') return '#16a34a';
+    if (alignment === 'strong_bearish') return '#dc2626';
+    if (alignment === 'conflicting' || alignment === 'mixed') return '#ca8a04';
+    if (alignment === 'aligned_bullish') return '#0d9488';
+    if (alignment === 'aligned_bearish') return '#9333ea';
+    return '#6b7280';
+  };
+
+  const renderAlignment = () => {
+    if (!data?.alignment) return null;
+    const a = data.alignment;
+    return (
+      <div className="alignment-card">
+        <h3>Timeframe Alignment</h3>
+        <div className="alignment-trends">
+          <div><span>Daily</span><strong>{a.daily_trend ?? '—'}</strong></div>
+          <div><span>1h</span><strong>{a.hourly_trend ?? '—'}</strong></div>
+          <div><span>15m</span><strong>{a.m15_trend ?? '—'}</strong></div>
+        </div>
+        <div className="alignment-badge" style={{ background: alignmentColor(a.alignment) }}>
+          {a.alignment ? a.alignment.replace(/_/g, ' ').toUpperCase() : 'N/A'}
+        </div>
+        <p className="alignment-note">{a.note}</p>
+      </div>
+    );
+  };
+
   const renderPositions = () => {
     if (positionsLoading) return <div className="positions-loading">Loading positions…</div>;
     if (positionsError) return <div className="error">Error: {positionsError}</div>;
@@ -786,6 +814,7 @@ function App() {
             )}
 
             {renderHistory()}
+            {renderAlignment()}
           </div>
 
           <aside className="news-col">{renderNews()}</aside>

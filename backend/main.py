@@ -7,18 +7,11 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.data_engine.loader import generate_synthetic, load_from_yfinance
-from backend.candles.candle_engine import add_candle_metrics, detect_patterns
-from backend.indicators.indicator_engine import (
-    add_indicators,
-    find_swing_points,
-    add_trend_read,
-    add_support_resistance,
-)
-from backend.signals.scoring_engine import add_scores
-from backend.risk.risk_engine import add_risk_levels
 from backend.signals.explanation_engine import explain as explain_row
 from backend.learning.content import list_topics, get_topic
 from backend.positions.position_store import position_store
+from backend.pipeline import run_pipeline
+from backend.multi_timeframe.mtf_engine import check_alignment
 
 
 def detect_currency(ticker: str) -> dict | None:
@@ -154,19 +147,6 @@ app.add_middleware(
 )
 
 
-def run_pipeline(df: pd.DataFrame) -> pd.DataFrame:
-    """Run the full existing pipeline on a standard OHLCV DataFrame."""
-    df = add_candle_metrics(df)
-    df = detect_patterns(df)
-    df = add_indicators(df)
-    df = find_swing_points(df, lookback=5)
-    df = add_trend_read(df)
-    df = add_support_resistance(df)
-    df = add_scores(df)
-    df = add_risk_levels(df)
-    return df
-
-
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -293,6 +273,13 @@ def analyze(
     currency = detect_currency(ticker) if source == "yfinance" else None
     news = fetch_news(ticker) if source == "yfinance" else []
 
+    alignment_result = None
+    if source == "yfinance":
+        try:
+            alignment_result = check_alignment(ticker)
+        except Exception:
+            alignment_result = None
+
     return {
         "source": source,
         "interval": interval,
@@ -306,6 +293,7 @@ def analyze(
             "candles": chart_candles,
             "levels": levels,
         },
+        "alignment": alignment_result,
     }
 
 
@@ -363,6 +351,19 @@ def learn_topic(topic_id: str):
     if topic is None:
         raise HTTPException(status_code=404, detail=f"Topic '{topic_id}' not found.")
     return topic
+
+
+@app.get("/alignment/{ticker}")
+def alignment(ticker: str):
+    """Return multi-timeframe trend alignment for a ticker."""
+    try:
+        result = check_alignment(ticker)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to compute alignment for '{ticker}': {exc}",
+        )
+    return result
 
 
 def _fetch_current_price(ticker: str) -> float:

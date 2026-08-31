@@ -845,3 +845,64 @@ body {
   opacity: 0.6;
   cursor: not-allowed;
 }
+
+/* Alignment section */
+.alignment-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 16px 20px;
+  margin-bottom: 16px;
+}
+
+.alignment-card h3 {
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.alignment-trends {
+  display: flex;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.alignment-trends div {
+  flex: 1;
+  display: flex;
+  justify-content: space-between;
+  font-size: 14px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #f9fafb;
+  border: 1px solid var(--border);
+}
+
+.alignment-trends span {
+  color: var(--text-secondary);
+}
+
+.alignment-trends strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.alignment-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+.alignment-note {
+  margin: 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
