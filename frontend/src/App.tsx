@@ -3,7 +3,18 @@ import type { AnalyzeResponse, LearnTopic, Position, PositionsResponse, ScanResu
 import CandleChart from './CandleChart';
 import './App.css';
 
-const API_URL = 'http://127.0.0.1:8000/analyze/synthetic';
+// API base URL comes from the build-time env var VITE_API_BASE_URL so the
+// deployed backend URL is never baked into source. Falls back to localhost for
+// local `npm run dev` without the var set.
+const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://127.0.0.1:8000').replace(/\/+$/, '');
+const API_KEY = (import.meta.env.VITE_BACKEND_API_KEY ?? '').trim();
+
+const apiHeaders: Record<string, string> = {
+  'Content-Type': 'application/json',
+};
+if (API_KEY) {
+  apiHeaders['X-API-Key'] = API_KEY;
+}
 
 const TICKERS: { market: string; flag: string; ticker: string }[] = [
   { market: 'India (NSE)', flag: '🇮🇳', ticker: 'RELIANCE.NS' },
@@ -47,7 +58,7 @@ function App() {
   const [source, setSource] = useState(() => readLS(LS.source, 'synthetic'));
   const [ticker, setTicker] = useState(() => readLS(LS.ticker, 'RELIANCE.NS'));
   const [intervalVal, setIntervalVal] = useState(() => readLS(LS.interval, '1d'));
-  const [view, setView] = useState<'single' | 'scanner' | 'learn' | 'positions'>('single');
+  const [view, setView] = useState<'single' | 'scanner' | 'learn' | 'positions' | 'live'>('single');
   const [scanData, setScanData] = useState<ScanResult[] | null>(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -59,6 +70,26 @@ function App() {
   const [positionsLoading, setPositionsLoading] = useState(false);
   const [positionsError, setPositionsError] = useState<string | null>(null);
   const [openPositionLoading, setOpenPositionLoading] = useState(false);
+
+  // Live / Groww state
+  const [growwStatus, setGrowwStatus] = useState<{ connected: boolean; real_trading_enabled: boolean } | null>(null);
+  const [growwHoldings, setGrowwHoldings] = useState<any[] | null>(null);
+  const [growwPositions, setGrowwPositions] = useState<any[] | null>(null);
+  const [growwMargin, setGrowwMargin] = useState<any | null>(null);
+  const [growwOrders, setGrowwOrders] = useState<any[] | null>(null);
+  const [growwLoading, setGrowwLoading] = useState(false);
+  const [growwError, setGrowwError] = useState<string | null>(null);
+  const [orderForm, setOrderForm] = useState({
+    trading_symbol: 'RELIANCE.NS',
+    exchange: 'NSE',
+    segment: 'EQ',
+    product: 'CNC',
+    order_type: 'LIMIT',
+    transaction_type: 'BUY',
+    quantity: 1,
+    price: '',
+    trigger_price: '',
+  });
 
   const fetched = useRef(false);
 
@@ -81,9 +112,9 @@ function App() {
       }
       const url =
         src === 'synthetic'
-          ? API_URL
-          : 'http://127.0.0.1:8000/analyze/' + src + '?' + params.toString();
-      const res = await fetch(url);
+          ? `${API_BASE}/analyze/synthetic`
+          : `${API_BASE}/analyze/${src}?${params.toString()}`;
+      const res = await fetch(url, { headers: apiHeaders });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json: AnalyzeResponse = await res.json();
       setData(json);
@@ -106,7 +137,7 @@ function App() {
     setScanLoading(true);
     setScanError(null);
     try {
-      const res = await fetch('http://127.0.0.1:8000/scan');
+      const res = await fetch(`${API_BASE}/scan`, { headers: apiHeaders });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json: ScanResponse = await res.json();
       setScanData(json.results);
@@ -124,7 +155,7 @@ function App() {
     setLearnLoading(true);
     setLearnError(null);
     try {
-      const res = await fetch('http://127.0.0.1:8000/learn');
+      const res = await fetch(`${API_BASE}/learn`, { headers: apiHeaders });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json = await res.json();
       setLearnTopics(json.topics);
@@ -139,7 +170,7 @@ function App() {
     setLearnLoading(true);
     setLearnError(null);
     try {
-      const res = await fetch('http://127.0.0.1:8000/learn/' + topicId);
+      const res = await fetch(`${API_BASE}/learn/${topicId}`, { headers: apiHeaders });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json: LearnTopic = await res.json();
       setSelectedTopic(json);
@@ -154,7 +185,7 @@ function App() {
     setPositionsLoading(true);
     setPositionsError(null);
     try {
-      const res = await fetch('http://127.0.0.1:8000/positions');
+      const res = await fetch(`${API_BASE}/positions`, { headers: apiHeaders });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json: PositionsResponse = await res.json();
       setPositions(json.positions);
@@ -165,13 +196,121 @@ function App() {
     }
   };
 
+  const fetchGrowwStatus = async () => {
+    setGrowwLoading(true);
+    setGrowwError(null);
+    try {
+      const res = await fetch(`${API_BASE}/groww/status`, { headers: apiHeaders });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      setGrowwStatus(json);
+    } catch (e: unknown) {
+      setGrowwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrowwLoading(false);
+    }
+  };
+
+  const fetchGrowwHoldings = async () => {
+    setGrowwLoading(true);
+    setGrowwError(null);
+    try {
+      const res = await fetch(`${API_BASE}/groww/holdings`, { headers: apiHeaders });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      setGrowwHoldings(json.holdings);
+    } catch (e: unknown) {
+      setGrowwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrowwLoading(false);
+    }
+  };
+
+  const fetchGrowwPositions = async () => {
+    setGrowwLoading(true);
+    setGrowwError(null);
+    try {
+      const res = await fetch(`${API_BASE}/groww/positions`, { headers: apiHeaders });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      setGrowwPositions(json.positions);
+    } catch (e: unknown) {
+      setGrowwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrowwLoading(false);
+    }
+  };
+
+  const fetchGrowwMargin = async () => {
+    setGrowwLoading(true);
+    setGrowwError(null);
+    try {
+      const res = await fetch(`${API_BASE}/groww/margin`, { headers: apiHeaders });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      setGrowwMargin(json);
+    } catch (e: unknown) {
+      setGrowwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrowwLoading(false);
+    }
+  };
+
+  const fetchGrowwOrders = async () => {
+    setGrowwLoading(true);
+    setGrowwError(null);
+    try {
+      const res = await fetch(`${API_BASE}/groww/orders`, { headers: apiHeaders });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json = await res.json();
+      setGrowwOrders(json.orders);
+    } catch (e: unknown) {
+      setGrowwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrowwLoading(false);
+    }
+  };
+
+  const placeGrowwOrder = async () => {
+    setGrowwLoading(true);
+    setGrowwError(null);
+    try {
+      const body: any = {
+        trading_symbol: orderForm.trading_symbol,
+        exchange: orderForm.exchange,
+        segment: orderForm.segment,
+        product: orderForm.product,
+        order_type: orderForm.order_type,
+        transaction_type: orderForm.transaction_type,
+        quantity: Number(orderForm.quantity),
+      };
+      if (orderForm.price !== '' && orderForm.price != null) body.price = Number(orderForm.price);
+      if (orderForm.trigger_price !== '' && orderForm.trigger_price != null) body.trigger_price = Number(orderForm.trigger_price);
+      const res = await fetch(`${API_BASE}/groww/orders`, {
+        method: 'POST',
+        headers: { ...apiHeaders, 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'HTTP ' + res.status }));
+        throw new Error(err.detail || 'HTTP ' + res.status);
+      }
+      await fetchGrowwOrders();
+      setOrderForm((f) => ({ ...f, quantity: 1, price: '', trigger_price: '' }));
+    } catch (e: unknown) {
+      setGrowwError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setGrowwLoading(false);
+    }
+  };
+
   const openPosition = async () => {
     if (!data?.explanation?.active_setup || !data?.ticker) return;
     setOpenPositionLoading(true);
     try {
-      const res = await fetch('http://127.0.0.1:8000/positions/open', {
+      const res = await fetch(`${API_BASE}/positions/open`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...apiHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ticker: data.ticker,
           interval: data.interval,
@@ -193,8 +332,9 @@ function App() {
   const closePosition = async (positionId: string) => {
     setPositionsLoading(true);
     try {
-      const res = await fetch('http://127.0.0.1:8000/positions/' + positionId + '/close', {
+      const res = await fetch(`${API_BASE}/positions/${positionId}/close`, {
         method: 'POST',
+        headers: apiHeaders,
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: 'HTTP ' + res.status }));
@@ -734,6 +874,163 @@ function App() {
     );
   };
 
+  const renderLive = () => {
+    if (growwLoading && !growwStatus) return <div className="positions-loading">Connecting to Groww…</div>;
+    if (growwError) return <div className="error">Error: {growwError}</div>;
+
+    const connected = growwStatus?.connected ?? false;
+
+    return (
+      <div className="live">
+        <div className="live-header">
+          <h2>Live Trading — Groww</h2>
+          <span className={`status-badge ${connected ? 'ok' : 'off'}`}>
+            {connected ? 'Connected' : 'Disconnected'}
+          </span>
+          {connected && (
+            <button className="refresh-btn" onClick={() => {
+              fetchGrowwStatus();
+              fetchGrowwHoldings();
+              fetchGrowwPositions();
+              fetchGrowwMargin();
+              fetchGrowwOrders();
+            }}>
+              Refresh
+            </button>
+          )}
+        </div>
+
+        {!connected && (
+          <div className="live-setup">
+            <h3>Setup</h3>
+            <p>To enable live trading, add your Groww API credentials to the backend <code>.env</code> file:</p>
+            <pre>{`GROWW_API_KEY=your_key\nGROWW_API_SECRET=your_secret\nGROWW_ALLOW_REAL_ORDERS=false`}</pre>
+            <p className="paper-warning">Keep <code>GROWW_ALLOW_REAL_ORDERS=false</code> for safe mode. Real orders are disabled until you explicitly enable it.</p>
+          </div>
+        )}
+
+        {connected && (
+          <>
+            <div className="live-grid">
+              <div className="card">
+                <h3>Margin</h3>
+                {growwMargin ? (
+                  <div className="kv">
+                    <div><span>Available cash</span><strong>{growwMargin.available_cash?.toFixed(2) ?? '—'}</strong></div>
+                    <div><span>Used margin</span><strong>{growwMargin.used_margin?.toFixed(2) ?? '—'}</strong></div>
+                    <div><span>Available margin</span><strong>{growwMargin.available_margin?.toFixed(2) ?? '—'}</strong></div>
+                  </div>
+                ) : (
+                  <button onClick={fetchGrowwMargin}>Load margin</button>
+                )}
+              </div>
+
+              <div className="card">
+                <h3>Holdings ({growwHoldings?.length ?? 0})</h3>
+                <button onClick={fetchGrowwHoldings}>Refresh holdings</button>
+                {growwHoldings && growwHoldings.length === 0 && <p className="empty">No holdings.</p>}
+                {growwHoldings && growwHoldings.length > 0 && (
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th>Symbol</th><th>Qty</th><th>Avg price</th><th>Invested</th></tr>
+                      </thead>
+                      <tbody>
+                        {growwHoldings.map((h, i) => (
+                          <tr key={i}>
+                            <td>{h.trading_symbol}</td>
+                            <td>{h.quantity}</td>
+                            <td>{h.average_price?.toFixed(2)}</td>
+                            <td>{h.invested_value?.toFixed(2)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              <div className="card">
+                <h3>Positions ({growwPositions?.length ?? 0})</h3>
+                <button onClick={fetchGrowwPositions}>Refresh positions</button>
+                {growwPositions && growwPositions.length === 0 && <p className="empty">No open positions.</p>}
+                {growwPositions && growwPositions.length > 0 && (
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr><th>Symbol</th><th>Qty</th><th>Avg price</th><th>Product</th></tr>
+                      </thead>
+                      <tbody>
+                        {growwPositions.map((p, i) => (
+                          <tr key={i}>
+                            <td>{p.trading_symbol}</td>
+                            <td>{p.quantity}</td>
+                            <td>{p.average_price?.toFixed(2)}</td>
+                            <td>{p.product}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="card order-card">
+              <h3>Place Order</h3>
+              <div className="order-form">
+                <input value={orderForm.trading_symbol} onChange={e => setOrderForm({ ...orderForm, trading_symbol: e.target.value })} placeholder="Symbol" />
+                <select value={orderForm.exchange} onChange={e => setOrderForm({ ...orderForm, exchange: e.target.value })}>
+                  <option value="NSE">NSE</option>
+                  <option value="BSE">BSE</option>
+                </select>
+                <select value={orderForm.product} onChange={e => setOrderForm({ ...orderForm, product: e.target.value })}>
+                  <option value="CNC">CNC</option>
+                  <option value="MIS">MIS</option>
+                  <option value="NRML">NRML</option>
+                </select>
+                <select value={orderForm.transaction_type} onChange={e => setOrderForm({ ...orderForm, transaction_type: e.target.value })}>
+                  <option value="BUY">BUY</option>
+                  <option value="SELL">SELL</option>
+                </select>
+                <input type="number" value={orderForm.quantity} onChange={e => setOrderForm({ ...orderForm, quantity: Number(e.target.value) })} placeholder="Qty" min={1} />
+                <input value={orderForm.price} onChange={e => setOrderForm({ ...orderForm, price: e.target.value })} placeholder="Price" />
+                <button className="primary" onClick={placeGrowwOrder} disabled={growwLoading}>Place order</button>
+              </div>
+            </div>
+
+            <div className="card">
+              <h3>Orders</h3>
+              <button onClick={fetchGrowwOrders}>Refresh orders</button>
+              {growwOrders && growwOrders.length === 0 && <p className="empty">No orders.</p>}
+              {growwOrders && growwOrders.length > 0 && (
+                <div className="table-wrap">
+                  <table>
+                    <thead>
+                      <tr><th>ID</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Status</th><th>Placed</th></tr>
+                    </thead>
+                    <tbody>
+                      {growwOrders.map((o, i) => (
+                        <tr key={i}>
+                          <td>{o.order_id}</td>
+                          <td>{o.trading_symbol}</td>
+                          <td>{o.transaction_type}</td>
+                          <td>{o.quantity}</td>
+                          <td>{o.status}</td>
+                          <td>{o.placed_at ? new Date(o.placed_at).toLocaleString() : '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -776,6 +1073,17 @@ function App() {
               }}
             >
               Positions
+            </button>
+            <button
+              className={view === 'live' ? 'tab active' : 'tab'}
+              onClick={() => {
+                setView('live');
+                if (!growwStatus && !growwLoading) {
+                  fetchGrowwStatus();
+                }
+              }}
+            >
+              Live
             </button>
           </div>
 
@@ -846,6 +1154,8 @@ function App() {
         </div>
       ) : view === 'positions' ? (
         renderPositions()
+      ) : view === 'live' ? (
+        renderLive()
       ) : (
         <div className="layout">
           <div className="main-col">

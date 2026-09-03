@@ -67,14 +67,14 @@ def run(tickers: List[str], train_only: bool = True) -> dict:
         succeeded.append(ticker)
         train_df, test_df = split_train_test(df, TRAIN_FRACTION)
 
-        train_metrics = run_backtest(train_df)
+        train_metrics = run_backtest(train_df, capital=100000, risk_per_trade_pct=1.0, slippage_bps=10, brokerage_per_order=20, stt_percent=0.1, other_charges_percent=0.05)
         train_trades_list = train_metrics.pop("trades", [])
         train_trades.extend(train_trades_list)
         train_watch.append(evaluate_watch_direction(train_df))
 
         # TRAIN-ONLY discipline: do not compute or look at the TEST split.
         if not train_only:
-            test_metrics = run_backtest(test_df)
+            test_metrics = run_backtest(test_df, capital=100000, risk_per_trade_pct=1.0, slippage_bps=10, brokerage_per_order=20, stt_percent=0.1, other_charges_percent=0.05)
             test_trades_list = test_metrics.pop("trades", [])
             test_trades.extend(test_trades_list)
             test_watch.append(evaluate_watch_direction(test_df))

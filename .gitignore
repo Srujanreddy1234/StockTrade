@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+# Node / Vite
+node_modules/
+frontend/dist/
+.dist/
+.vercel
+
+# OS
+.DS_Store

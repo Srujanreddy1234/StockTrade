@@ -66,7 +66,7 @@ def run_basket(tickers: List[str]) -> dict:
         try:
             df = load_from_yfinance(ticker, period=PERIOD, interval=INTERVAL)
             df = run_pipeline(df)
-            metrics = run_backtest(df)
+            metrics = run_backtest(df, capital=100000, risk_per_trade_pct=1.0, slippage_bps=10, brokerage_per_order=20, stt_percent=0.1, other_charges_percent=0.05)
         except Exception as e:
             print(f"  WARNING: skipped {ticker}: {e}")
             continue
@@ -109,15 +109,18 @@ def _compute_metrics(trades: list[dict]) -> dict:
 
     win_rate = len(wins) / len(resolved) * 100.0 if resolved else 0.0
 
-    returns = [t["return_pct"] for t in resolved if t["return_pct"] is not None]
-    average_return = float(pd.Series(returns).mean()) if returns else 0.0
-    average_win = float(pd.Series([t["return_pct"] for t in wins]).mean()) if wins else 0.0
-    average_loss = float(pd.Series([t["return_pct"] for t in losses]).mean()) if losses else 0.0
+    gross_returns = [t["gross_return_pct"] for t in resolved if t.get("gross_return_pct") is not None]
+    average_return = float(pd.Series(gross_returns).mean()) if gross_returns else 0.0
+    average_win = float(pd.Series([t["gross_return_pct"] for t in wins]).mean()) if wins else 0.0
+    average_loss = float(pd.Series([t["gross_return_pct"] for t in losses]).mean()) if losses else 0.0
 
-    win_returns = [t["return_pct"] for t in wins]
-    loss_returns = [t["return_pct"] for t in losses]
+    win_returns = [t["gross_return_pct"] for t in wins]
+    loss_returns = [t["gross_return_pct"] for t in losses]
     largest_win = max(win_returns) if win_returns else 0.0
     largest_loss = min(loss_returns) if loss_returns else 0.0
+
+    net_returns = [t["return_pct"] for t in resolved if t.get("return_pct") is not None]
+    average_cost_adjusted_return = float(pd.Series(net_returns).mean()) if net_returns else 0.0
 
     return {
         "total_trades": total,
@@ -130,6 +133,7 @@ def _compute_metrics(trades: list[dict]) -> dict:
         "average_loss": round(average_loss, 4),
         "largest_win": round(largest_win, 4),
         "largest_loss": round(largest_loss, 4),
+        "average_cost_adjusted_return": round(average_cost_adjusted_return, 4),
         "trades": trades,
     }
 

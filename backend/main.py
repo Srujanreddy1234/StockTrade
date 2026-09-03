@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import os
+from typing import Optional
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import pandas as pd
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, Query, HTTPException, Body
+from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.data_engine.loader import generate_synthetic, load_from_yfinance
+from backend.data_engine.loader import generate_synthetic, load_from_yfinance_cached
 from backend.signals.explanation_engine import explain as explain_row
 from backend.learning.content import list_topics, get_topic
 from backend.positions.position_store import position_store
 from backend.pipeline import run_pipeline
 from backend.multi_timeframe.mtf_engine import check_alignment
 from backend.chart_patterns.chart_pattern_engine import detect_chart_patterns
+from backend.db.engine import SessionLocal
+from backend.db.init_db import init_db
+from backend.db.repository import ScanHistoryRepository, BacktestRunRepository
+from backend.groww.client import get_client
+from backend.groww.auth import is_real_trading_enabled, GrowwAuthError
+
+init_db()
 
 
 def detect_currency(ticker: str) -> dict | None:
@@ -73,7 +88,7 @@ def analyze_ticker(ticker: str, interval: str = SCAN_INTERVAL, period: str = SCA
     Single source of truth reused by both /analyze and /scan so the scanner
     does not duplicate pipeline logic.
     """
-    df = load_from_yfinance(ticker=ticker, period=period, interval=interval)
+    df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
     df = run_pipeline(df)
     last_loc = df.index[-1]
     return df, explain_row(df, last_loc)
@@ -138,14 +153,97 @@ def fetch_news(ticker: str, limit: int = 6) -> list[dict]:
 
 
 app = FastAPI(title="Stock Trading Assistant")
-# Local dev only -- tighten before any real deployment.
+
+_default_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_allowed_raw = os.environ.get("BACKEND_CORS_ORIGINS")
+if _allowed_raw and _allowed_raw.strip() not in ("*", ""):
+    _allow_origins = [o.strip() for o in _allowed_raw.split(",") if o.strip()]
+else:
+    _allow_origins = _default_origins
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_BACKEND_API_KEY = os.environ.get("BACKEND_API_KEY", "").strip()
+_RATE_LIMIT_WINDOW = 60
+_RATE_LIMIT_MAX = 10
+_rate_limit_store: dict[str, list[float]] = {}
+
+
+class AuthMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        method = scope.get("method", "").upper()
+        if method == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path in ("/health", "/docs", "/redoc", "/openapi.json"):
+            await self.app(scope, receive, send)
+            return
+
+        if _BACKEND_API_KEY:
+            headers = dict(scope.get("headers", []))
+            api_key = headers.get(b"x-api-key", b"").decode("utf-8", errors="ignore")
+            if api_key != _BACKEND_API_KEY:
+                from starlette.responses import JSONResponse
+                await JSONResponse({"detail": "Invalid or missing API key"}, status_code=401)(scope, receive, send)
+                return
+
+        await self.app(scope, receive, send)
+
+
+class RateLimitMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        if path not in ("/analyze", "/analyze/synthetic", "/scan"):
+            await self.app(scope, receive, send)
+            return
+
+        client = scope.get("client")
+        ip = client[0] if client else "unknown"
+        now = __import__("time").time()
+        window_start = now - _RATE_LIMIT_WINDOW
+
+        timestamps = _rate_limit_store.get(ip, [])
+        timestamps = [t for t in timestamps if t > window_start]
+
+        if len(timestamps) >= _RATE_LIMIT_MAX:
+            from starlette.responses import JSONResponse
+            await JSONResponse({"detail": "Rate limit exceeded"}, status_code=429)(scope, receive, send)
+            return
+
+        timestamps.append(now)
+        _rate_limit_store[ip] = timestamps
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(AuthMiddleware)
+app.add_middleware(RateLimitMiddleware)
 
 
 @app.get("/health")
@@ -170,7 +268,7 @@ def analyze(
         else:
             period = "2y"
         try:
-            df = load_from_yfinance(ticker=ticker, period=period, interval=interval)
+            df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
         except Exception as exc:  # yfinance not installed, network, or bad ticker
             raise HTTPException(
                 status_code=502,
@@ -336,6 +434,17 @@ def scan():
         key=lambda r: (r["score"] if r["score"] is not None else -1), reverse=True
     )
 
+    payload = {
+        "scanned_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+        "results": results,
+        "skipped": skipped,
+    }
+    try:
+        db = __import__("backend.db.engine", fromlist=["SessionLocal"]).SessionLocal()
+        ScanHistoryRepository(db).create(payload)
+    except Exception:
+        pass
+
     return {
         "count": len(results),
         "skipped": skipped,
@@ -369,6 +478,26 @@ def alignment(ticker: str):
             detail=f"Failed to compute alignment for '{ticker}': {exc}",
         )
     return result
+
+
+@app.get("/backtests")
+def list_backtests(limit: int = Query(50)):
+    """Return recent backtest runs."""
+    db = SessionLocal()
+    try:
+        return {"runs": BacktestRunRepository(db).list_recent(limit=limit)}
+    finally:
+        db.close()
+
+
+@app.get("/scan-history")
+def list_scan_history(limit: int = Query(50)):
+    """Return recent scan history snapshots."""
+    db = SessionLocal()
+    try:
+        return {"scans": ScanHistoryRepository(db).list_recent(limit=limit)}
+    finally:
+        db.close()
 
 
 def _fetch_current_price(ticker: str) -> float:
@@ -434,7 +563,7 @@ def open_position(body: dict[str, str]):
         raise HTTPException(status_code=400, detail="Field 'ticker' is required.")
 
     try:
-        df = load_from_yfinance(ticker=ticker, period="2y", interval=interval)
+        df = load_from_yfinance_cached(ticker=ticker, period="2y", interval=interval)
     except Exception as exc:
         raise HTTPException(
             status_code=502,
@@ -554,3 +683,108 @@ def close_position(position_id: str):
 
     closed = position_store.close(position_id, current_price, "manual_close")
     return closed
+
+
+@app.get("/groww/status")
+def groww_status():
+    """Return Groww connection status and whether real trading is enabled."""
+    try:
+        client = get_client()
+        client._get_api()
+        connected = True
+    except Exception:
+        connected = False
+    return {
+        "connected": connected,
+        "real_trading_enabled": is_real_trading_enabled(),
+    }
+
+
+@app.get("/groww/holdings")
+def groww_holdings():
+    """Fetch current holdings from Groww."""
+    client = get_client()
+    try:
+        holdings = client.get_holdings()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"holdings": holdings}
+
+
+@app.get("/groww/positions")
+def groww_positions():
+    """Fetch current positions from Groww."""
+    client = get_client()
+    try:
+        positions = client.get_positions()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"positions": positions}
+
+
+@app.get("/groww/margin")
+def groww_margin():
+    """Fetch margin details from Groww."""
+    client = get_client()
+    try:
+        margin = client.get_margin()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return margin
+
+
+@app.get("/groww/orders")
+def groww_orders():
+    """Fetch order history from Groww."""
+    client = get_client()
+    try:
+        orders = client.get_orders()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"orders": orders}
+
+
+class GrowwOrderRequest(BaseModel):
+    trading_symbol: str
+    exchange: str = "NSE"
+    segment: str = "EQ"
+    product: str = "CNC"
+    order_type: str = "LIMIT"
+    transaction_type: str = "BUY"
+    quantity: int
+    price: Optional[float] = None
+    trigger_price: Optional[float] = None
+
+
+@app.post("/groww/orders")
+def groww_place_order(payload: GrowwOrderRequest):
+    """Place an order via Groww. Only works if GROWW_ALLOW_REAL_ORDERS=true."""
+    if not is_real_trading_enabled():
+        raise HTTPException(status_code=403, detail="Real trading is disabled. Set GROWW_ALLOW_REAL_ORDERS=true to enable.")
+    client = get_client()
+    try:
+        result = client.place_order(payload.dict())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Order failed: {exc}") from exc
+    return result
+
+
+@app.post("/groww/orders/{order_id}/cancel")
+def groww_cancel_order(order_id: str):
+    """Cancel an order via Groww."""
+    client = get_client()
+    try:
+        result = client.cancel_order(order_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Cancel failed: {exc}") from exc
+    return result
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Most hosts (Render, Railway, Fly) inject the listen port via $PORT.
+    port = int(os.environ.get("PORT", 8000))
+    # Run as an object (not the "backend.main:app" string) so this works when
+    # launched with `python -m backend.main` from the repo root.
+    uvicorn.run(app, host="0.0.0.0", port=port)

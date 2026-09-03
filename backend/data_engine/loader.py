@@ -37,6 +37,29 @@ def load_from_yfinance(ticker: str, period: str = "1mo", interval: str = "1d"):
     return _standardize(raw)
 
 
+def load_from_yfinance_cached(ticker: str, period: str = "1mo", interval: str = "1d", max_age_seconds: int = 3600):
+    from datetime import datetime, timezone, timedelta
+    from backend.db.repository import OHLCVCacheRepository
+    from backend.db.engine import SessionLocal
+
+    db = SessionLocal()
+    repo = OHLCVCacheRepository(db)
+    cached = repo.get(ticker, interval)
+
+    if cached:
+        fetched = datetime.fromisoformat(cached["fetched_at"])
+        if datetime.now(timezone.utc) - fetched < timedelta(seconds=max_age_seconds):
+            import json
+            data = pd.read_json(cached["data_json"], orient="split")
+            data.index = pd.to_datetime(data.index)
+            return _standardize(data)
+
+    df = load_from_yfinance(ticker=ticker, period=period, interval=interval)
+    data_json = df.to_json(orient="split")
+    repo.put(ticker, interval, data_json, source="yfinance")
+    return df
+
+
 def load_from_csv(path: str) -> pd.DataFrame:
     """Load OHLCV data from a CSV file with a date column + OHLCV columns."""
     raw = pd.read_csv(path, parse_dates=True, index_col=0)

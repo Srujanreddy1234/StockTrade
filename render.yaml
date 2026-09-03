@@ -1,0 +1,32 @@
+# Render (backend) — free web service.
+# Deploy: push this repo to GitHub, then "New + Web Service" on Render and
+# select the repo (the startCommand/buildCommand below are picked up automatically).
+# Render injects $PORT; the app binds to it (see backend/main.py __main__).
+services:
+  - type: web
+    name: stock-trading-assistant
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      # Repo root must be importable so `uvicorn backend.main:app` resolves.
+      - key: PYTHONPATH
+        value: .
+      # Comma-separated allowed origins. Set this to your Vercel frontend URL
+      # in production (e.g. https://stock-trading-assistant.vercel.app).
+      - key: BACKEND_CORS_ORIGINS
+        value: http://localhost:5173,http://127.0.0.1:5173
+      # Simple API key. Generate a random string and set it here and in Vercel
+      # as VITE_BACKEND_API_KEY. Leave empty to disable auth (not recommended).
+      - key: BACKEND_API_KEY
+        value: change-me-to-a-random-string
+      # IMPORTANT: SQLite DB file is stored at ./stocktrade.db by default.
+      # Render free tier disks are ephemeral. Add a Render Persistent Disk
+      # (Settings → Disks → Add Disk, 1 GB is the smallest) and mount it at
+      # /opt/render/project/src, then set DATABASE_URL to:
+      #   sqlite:////opt/render/project/src/stocktrade.db
+      # Without a persistent disk, all positions and scan history are lost
+      # on every deploy/cold-start.
+      - key: DATABASE_URL
+        value: sqlite:///./stocktrade.db

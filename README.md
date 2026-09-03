@@ -133,6 +133,47 @@ npm run dev
 
 ---
 
+## Deployment
+
+The app is split into a FastAPI backend (deploys to Render) and a Vite/React
+frontend (deploys to Vercel). No pipeline code changes are needed — only the
+config in this section.
+
+### Backend (Render, free tier)
+
+1. Push this repo to GitHub (the deploy files below are already included):
+   - `requirements.txt` — now includes `yfinance`.
+   - `render.yaml` — builds with `pip install -r requirements.txt` and starts
+     `uvicorn backend.main:app --host 0.0.0.0 --port $PORT`.
+   - `backend/main.py` — binds to `$PORT` (injected by Render) and reads
+     `BACKEND_CORS_ORIGINS` for CORS (defaults to `*`).
+2. In Render: **New + Web Service → connect the repo**. It auto-reads
+   `render.yaml`. Set `PYTHONPATH=.` (done in `render.yaml`) and optionally set
+   `BACKEND_CORS_ORIGINS` to your Vercel URL to tighten CORS.
+3. Deploy. Your backend URL will be `https://<service>.onrender.com`.
+
+> **Free-tier caveat:** Render free web services spin down when idle, so the
+> first request after a pause can take ~30–60s (cold start). The `/scan`
+> endpoint fetches 18 tickers from yfinance per call and may exceed a short
+> request timeout on a cold start — prefer `/analyze` for quick checks, and
+> consider bumping the request timeout or moving `/scan` to a background job
+> later.
+
+### Frontend (Vercel, free tier)
+
+1. In Vercel: **Add New Project → import the repo**. Set:
+   - **Root Directory:** `frontend` (also encoded in `vercel.json`).
+   - **Build Command:** `npm install && npm run build` (also in `vercel.json`).
+   - **Build Environment Variable:** `VITE_API_BASE_URL` = your Render URL
+     (e.g. `https://<service>.onrender.com`). This is inlined at build time.
+2. Deploy. Your frontend URL will be `https://<project>.vercel.app`.
+
+> `VITE_API_BASE_URL` is read at build time, so changing it requires a rebuild.
+> For local dev with no var set, the frontend falls back to
+> `http://127.0.0.1:8000`. See `.env.example` for the variable names.
+
+---
+
 ## Running the Demo
 
 ```bash

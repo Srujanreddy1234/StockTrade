@@ -26,6 +26,11 @@ from backend.indicators.indicator_engine import (
 from backend.signals.scoring_engine import add_scores
 from backend.risk.risk_engine import add_risk_levels
 from backend.backtesting.backtest_engine import run_backtest
+from backend.db.init_db import init_db
+from backend.db.repository import BacktestRunRepository
+from backend.db.engine import SessionLocal
+
+init_db()
 
 
 TICKERS = [
@@ -87,8 +92,8 @@ def run_walk_forward(tickers: List[str]) -> dict:
         train_df, test_df = split_train_test(df, TRAIN_FRACTION)
 
         try:
-            train_metrics = run_backtest(train_df)
-            test_metrics = run_backtest(test_df)
+            train_metrics = run_backtest(train_df, capital=100000, risk_per_trade_pct=1.0, slippage_bps=10, brokerage_per_order=20, stt_percent=0.1, other_charges_percent=0.05)
+            test_metrics = run_backtest(test_df, capital=100000, risk_per_trade_pct=1.0, slippage_bps=10, brokerage_per_order=20, stt_percent=0.1, other_charges_percent=0.05)
         except Exception as e:
             print(f"  WARNING: skipped {ticker} (backtest failed): {e}")
             continue
@@ -142,15 +147,18 @@ def _compute_metrics(trades: list[dict]) -> dict:
 
     win_rate = len(wins) / len(resolved) * 100.0 if resolved else 0.0
 
-    returns = [t["return_pct"] for t in resolved if t["return_pct"] is not None]
-    average_return = float(pd.Series(returns).mean()) if returns else 0.0
-    average_win = float(pd.Series([t["return_pct"] for t in wins]).mean()) if wins else 0.0
-    average_loss = float(pd.Series([t["return_pct"] for t in losses]).mean()) if losses else 0.0
+    gross_returns = [t["gross_return_pct"] for t in resolved if t.get("gross_return_pct") is not None]
+    average_return = float(np.mean(gross_returns)) if gross_returns else 0.0
+    average_win = float(np.mean([t["gross_return_pct"] for t in wins])) if wins else 0.0
+    average_loss = float(np.mean([t["gross_return_pct"] for t in losses])) if losses else 0.0
 
-    win_returns = [t["return_pct"] for t in wins]
-    loss_returns = [t["return_pct"] for t in losses]
+    win_returns = [t["gross_return_pct"] for t in wins]
+    loss_returns = [t["gross_return_pct"] for t in losses]
     largest_win = max(win_returns) if win_returns else 0.0
     largest_loss = min(loss_returns) if loss_returns else 0.0
+
+    net_returns = [t["return_pct"] for t in resolved if t.get("return_pct") is not None]
+    average_cost_adjusted_return = float(np.mean(net_returns)) if net_returns else 0.0
 
     return {
         "total_trades": total,
@@ -163,8 +171,35 @@ def _compute_metrics(trades: list[dict]) -> dict:
         "average_loss": round(average_loss, 4),
         "largest_win": round(largest_win, 4),
         "largest_loss": round(largest_loss, 4),
+        "average_cost_adjusted_return": round(average_cost_adjusted_return, 4),
         "trades": trades,
     }
+
+
+def save_backtest_run(ticker: str, interval: str, parameters: dict, metrics: dict) -> None:
+    import uuid
+    db = SessionLocal()
+    try:
+        BacktestRunRepository(db).create({
+            "id": str(uuid.uuid4()),
+            "ticker": ticker,
+            "interval": interval,
+            "parameters": _sanitize_for_json(parameters),
+            "metrics": _sanitize_for_json(metrics),
+        })
+    finally:
+        db.close()
+
+
+def _sanitize_for_json(obj):
+    import pandas as pd
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize_for_json(v) for v in obj]
+    if isinstance(obj, (pd.Timestamp,)):
+        return obj.isoformat()
+    return obj
 
 
 if __name__ == "__main__":
@@ -172,6 +207,20 @@ if __name__ == "__main__":
     print(f"Train/test split: {int((1-TRAIN_FRACTION)*100)}% test")
     print()
     results = run_walk_forward(TICKERS)
+
+    save_backtest_run(
+        ticker="basket",
+        interval=INTERVAL,
+        parameters={
+            "tickers": TICKERS,
+            "period": PERIOD,
+            "train_fraction": TRAIN_FRACTION,
+        },
+        metrics={
+            "combined_train": results["combined_train"],
+            "combined_test": results["combined_test"],
+        },
+    )
 
     print()
     print("=== COMBINED TRAIN METRICS ===")

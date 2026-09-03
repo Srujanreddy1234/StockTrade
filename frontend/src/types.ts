@@ -152,3 +152,48 @@ export interface AlignmentResult {
   alignment: string | null;
   note: string;
 }
+
+export interface GrowwStatus {
+  connected: boolean;
+  real_trading_enabled: boolean;
+}
+
+export interface GrowwHolding {
+  trading_symbol: string;
+  company_name: string;
+  quantity: number;
+  average_price: number;
+  invested_value: number;
+}
+
+export interface GrowwPosition {
+  trading_symbol: string;
+  exchange: string;
+  segment: string;
+  product: string;
+  quantity: number;
+  average_price: number;
+  overnight_quantity: number;
+  overnight_average_price: number;
+}
+
+export interface GrowwMargin {
+  available_cash: number;
+  used_margin: number;
+  available_margin: number;
+}
+
+export interface GrowwOrder {
+  order_id: string;
+  trading_symbol: string;
+  exchange: string;
+  segment: string;
+  product: string;
+  order_type: string;
+  transaction_type: string;
+  quantity: number;
+  price: number | null;
+  trigger_price: number | null;
+  status: string;
+  placed_at: string | null;
+}
