@@ -57,7 +57,7 @@ function App() {
   const [showWhy, setShowWhy] = useState(false);
   const [source, setSource] = useState(() => readLS(LS.source, 'synthetic'));
   const [ticker, setTicker] = useState(() => readLS(LS.ticker, 'RELIANCE.NS'));
-  const [intervalVal, setIntervalVal] = useState(() => readLS(LS.interval, '1d'));
+  const [intervalVal, setIntervalVal] = useState(() => readLS(LS.interval, '1m'));
   const [view, setView] = useState<'single' | 'scanner' | 'learn' | 'positions' | 'live'>('single');
   const [scanData, setScanData] = useState<ScanResult[] | null>(null);
   const [scanLoading, setScanLoading] = useState(false);
@@ -352,9 +352,9 @@ function App() {
   const openTicker = (t: string) => {
     setSource('yfinance');
     setTicker(t);
-    setIntervalVal('1d');
+    setIntervalVal('1m');
     setView('single');
-    fetchData({ source: 'yfinance', ticker: t, interval: '1d' });
+    fetchData({ source: 'yfinance', ticker: t, interval: '1m' });
   };
 
   // Persist selections so a page refresh keeps the inputs and only the
@@ -1125,9 +1125,7 @@ function App() {
                     onChange={(e) => setIntervalVal(e.target.value)}
                     style={{ padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)' }}
                   >
-                    <option value="15m">15m</option>
-                    <option value="1h">1h</option>
-                    <option value="1d">1d</option>
+                    <option value="1m">1m</option>
                   </select>
                 </>
               )}

@@ -255,15 +255,18 @@ def health():
 def analyze(
     source: str,
     n_candles: int = Query(600),
-    interval: str = Query("15m"),
+    interval: str = Query("1m"),
     ticker: str = Query("RELIANCE.NS"),
 ):
     # yfinance intraday intervals (m/h) are restricted to ~60 days of history;
     # daily or longer intervals can pull multiple years.
+    # 1m data is typically limited to ~7 days.
     if source == "synthetic":
         df = generate_synthetic(n_candles=n_candles, seed=42)
     elif source == "yfinance":
-        if interval.endswith("m") or interval.endswith("h"):
+        if interval == "1m":
+            period = "7d"
+        elif interval.endswith("m") or interval.endswith("h"):
             period = "60d"
         else:
             period = "2y"
@@ -690,10 +693,12 @@ def groww_status():
     """Return Groww connection status and whether real trading is enabled."""
     try:
         client = get_client()
-        client._get_api()
+        api = client._get_api()
+        api.get_user_profile()
         connected = True
-    except Exception:
+    except Exception as exc:
         connected = False
+        detail = str(exc)
     return {
         "connected": connected,
         "real_trading_enabled": is_real_trading_enabled(),

@@ -7,7 +7,7 @@ from typing import Any
 
 from growwapi import GrowwAPI
 
-from backend.groww.auth import get_api_key, get_api_secret, GrowwAuthError
+from backend.groww.auth import get_api_key, get_api_secret, get_access_token, GrowwAuthError
 from backend.groww.models import (
     holding_from_api,
     margin_from_api,
@@ -31,17 +31,25 @@ class GrowwClient:
     def _get_api(self) -> GrowwAPI:
         if self._api is None:
             try:
-                api_key = get_api_key()
-                api_secret = get_api_secret()
-                access_token = GrowwAPI.get_access_token(
-                    api_key=api_key, secret=api_secret
-                )
-                self._api = GrowwAPI(access_token)
+                access_token = get_access_token()
             except GrowwAuthError:
-                raise
+                try:
+                    api_key = get_api_key()
+                    api_secret = get_api_secret()
+                    access_token = GrowwAPI.get_access_token(
+                        api_key=api_key, secret=api_secret
+                    )
+                except GrowwAuthError:
+                    raise
+                except Exception as exc:
+                    raise GrowwClientError(
+                        f"Failed to authenticate with Groww: {exc}"
+                    ) from exc
+            try:
+                self._api = GrowwAPI(access_token)
             except Exception as exc:
                 raise GrowwClientError(
-                    f"Failed to authenticate with Groww: {exc}"
+                    f"Failed to initialize Groww client with access token: {exc}"
                 ) from exc
         return self._api
 
@@ -61,7 +69,7 @@ class GrowwClient:
 
     def get_margin(self) -> dict[str, Any]:
         try:
-            return self._get_api().get_margin_for_user(timeout=15)
+            return self._get_api().get_available_margin_details(timeout=15)
         except Exception as exc:
             raise GrowwClientError(f"Failed to fetch margin: {exc}") from exc
 
