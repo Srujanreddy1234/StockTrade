@@ -133,6 +133,108 @@ npm run dev
 
 ---
 
+## Autonomous Trading Loop
+
+`backend/autonomous/` is a fully autonomous extension of the pipeline above:
+it watches live prices every ~1 second, decides to buy or sell on its own,
+and (once explicitly enabled) places real Groww orders with no human in the
+loop. **Read this whole section before turning on real orders.**
+
+### How it decides
+
+Two clocks run per ticker:
+
+- **Fast tick clock (default 1s):** pulls the latest price, updates O(1)
+  incremental rolling stats (mean/std, min/max, RSI, EMA -- see
+  `backend/autonomous/tick_stats.py`), and computes a buy/sell "probability"
+  (`backend/autonomous/probability_engine.py`) from how close price is to its
+  recent low/high, its z-score, RSI, and momentum. This is a **heuristic
+  score in [0,1]**, not a calibrated statistical probability -- treat it as
+  "how strongly do several simple signals agree," not a guarantee.
+- **Slow pipeline clock (default 60s):** re-runs the existing candle/
+  indicator/scoring/risk pipeline to get structural support/resistance,
+  `target1`, and `invalidation` levels.
+
+A **buy** only fires when both agree: the slow pipeline shows a real bullish
+ENTRY/WATCH setup with valid target/invalidation levels, AND the fast engine
+says price is currently near the bottom of its range with oversold/turning
+momentum. A **sell** fires the instant price touches the structural target or
+invalidation level, or the fast sell-probability crosses its threshold.
+
+### Non-negotiable risk guardrails
+
+These are enforced independently of the strategy logic, so a bad signal
+cannot exceed them (`backend/autonomous/risk_manager.py`):
+
+1. **Max capital per trade** -- % of available margin, capped by an absolute
+   rupee ceiling too (`AUTOTRADE_MAX_CAPITAL_PCT`, `AUTOTRADE_MAX_CAPITAL_ABS`).
+2. **Daily loss kill-switch** -- once today's realized+unrealized loss
+   crosses `AUTOTRADE_DAILY_LOSS_LIMIT_PCT` of the day's starting margin, no
+   new positions open until you `POST /autonomous/kill-switch/reset`. Open
+   positions keep being monitored so target/stop exits still work.
+3. **Max concurrent positions** (`AUTOTRADE_MAX_OPEN_POSITIONS`).
+4. **Per-ticker cooldown after a close** (`AUTOTRADE_COOLDOWN_MINUTES`) --
+   prevents rapid re-entry whipsaw on noisy ticks.
+
+It is also **long-only** (buys and sells, never shorts) and only trades
+during the NSE regular session (`AUTOTRADE_MARKET_OPEN`/`_CLOSE`, IST) -- it
+does not know about exchange holidays, so double-check the NSE holiday
+calendar before relying on it around a holiday.
+
+### Paper mode vs real money
+
+Controlled entirely by the existing `GROWW_ALLOW_REAL_ORDERS` flag:
+
+- `false` (default): every "buy"/"sell" is simulated at the observed price.
+  Nothing is sent to Groww. Positions and the full decision audit trail
+  (`autonomous_events` table) are recorded exactly as if it were real, so you
+  can validate behavior risk-free first.
+- `true`: real MARKET orders are placed via the existing `backend/groww`
+  client.
+
+**Strongly recommended: run in paper mode across at least one full session
+before ever setting `GROWW_ALLOW_REAL_ORDERS=true`.**
+
+### Running it
+
+```bash
+# Configure .env first (see .env.example) -- watchlist, thresholds, risk limits.
+cd /Users/srujanreddygangireddy/stocks/StockTrade
+python -m backend.autonomous.trader
+```
+
+This runs as its own long-lived process (not inside the FastAPI request
+cycle) so it keeps polling every second independently of whether anyone is
+using the web UI. Run it under a process supervisor (e.g. `pm2`, `supervisord`,
+a systemd service, or just `tmux`/`screen`) if you want it to survive a
+terminal close or restart on crash -- none of that is set up here yet.
+
+### Monitoring it
+
+- `GET /autonomous/status` -- current config, risk limits, kill-switch state,
+  open autonomous position count.
+- `GET /autonomous/events` -- full decision audit trail (buys, sells, skips
+  with the reason, errors), most recent first.
+- `POST /autonomous/kill-switch/reset` -- manually clear the daily-loss
+  kill-switch.
+- `GET /positions` -- includes autonomous positions alongside manual ones
+  (see the new `source` field: `"manual"` vs `"autonomous"`).
+
+### Known limitations
+
+- The probability score is a hand-tuned heuristic, not a trained/backtested
+  model for this specific autonomous strategy -- it has not been validated
+  the way the manual pipeline's ENTRY/WATCH signals have (see
+  [Signal Validation Status](#signal-validation-status)).
+- No exchange holiday calendar -- see `backend/autonomous/market_hours.py`.
+- Groww's live-trading (LTP/order) API rate limits are not explicitly
+  handled; a large watchlist polled every second may hit them.
+- The kill-switch state file (`AUTOTRADE_STATE_PATH`) is local disk, not
+  synced anywhere -- back it up if you care about the day's realized-P&L
+  counter surviving a machine loss mid-session.
+
+---
+
 ## Deployment
 
 The app is split into a FastAPI backend (deploys to Render) and a Vite/React

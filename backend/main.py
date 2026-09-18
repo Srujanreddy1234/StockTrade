@@ -785,6 +785,71 @@ def groww_cancel_order(order_id: str):
     return result
 
 
+@app.get("/autonomous/status")
+def autonomous_status():
+    """Report the autonomous loop's configuration and current risk state.
+
+    This endpoint only reads state -- it does not start or stop the loop.
+    The loop itself must be run as a separate process
+    (``python -m backend.autonomous.trader``) since it runs continuously and
+    should not live inside a request/response cycle.
+    """
+    from backend.autonomous.config import load_config
+    from backend.autonomous.risk_manager import RiskManager
+    from backend.groww.auth import is_real_trading_enabled
+
+    config = load_config()
+    risk = RiskManager(config)
+    return {
+        "mode": "live" if is_real_trading_enabled() else "paper",
+        "watchlist": config.watchlist,
+        "tick_interval_seconds": config.tick_interval_seconds,
+        "pipeline_refresh_seconds": config.pipeline_refresh_seconds,
+        "buy_probability_threshold": config.buy_probability_threshold,
+        "sell_probability_threshold": config.sell_probability_threshold,
+        "risk_limits": {
+            "max_capital_per_trade_pct": config.max_capital_per_trade_pct,
+            "max_capital_per_trade_abs": config.max_capital_per_trade_abs,
+            "daily_loss_limit_pct": config.daily_loss_limit_pct,
+            "max_open_positions": config.max_open_positions,
+            "cooldown_minutes": config.cooldown_minutes,
+        },
+        "risk_state": {
+            "date": risk.state.date,
+            "day_start_margin": risk.state.day_start_margin,
+            "realized_pnl_today": risk.state.realized_pnl_today,
+            "kill_switch_active": risk.state.kill_switch_active,
+            "kill_switch_reason": risk.state.kill_switch_reason,
+        },
+        "open_autonomous_positions": position_store.count_open(source="autonomous"),
+    }
+
+
+@app.post("/autonomous/kill-switch/reset")
+def autonomous_reset_kill_switch():
+    """Manually clear the daily-loss kill switch so the loop can resume
+    opening new positions. Existing open positions are unaffected either way.
+    """
+    from backend.autonomous.config import load_config
+    from backend.autonomous.risk_manager import RiskManager
+
+    risk = RiskManager(load_config())
+    risk.reset_kill_switch()
+    return {"kill_switch_active": risk.state.kill_switch_active}
+
+
+@app.get("/autonomous/events")
+def autonomous_events(limit: int = Query(100), ticker: Optional[str] = Query(None)):
+    """Return the autonomous loop's decision audit trail, most recent first."""
+    from backend.db.repository import AutonomousEventRepository
+
+    db = SessionLocal()
+    try:
+        return {"events": AutonomousEventRepository(db).list_recent(limit=limit, ticker=ticker)}
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     import uvicorn
 

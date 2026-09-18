@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from backend.db.engine import get_db
 from backend.db.models import (
+    AutonomousEventDB,
     BacktestRunDB,
     OHLCVCacheDB,
     PositionDB,
@@ -35,6 +36,9 @@ class PositionRepository:
             entry_date=now,
             status="open",
             unrealized_return_pct=0.0,
+            source=payload.get("source", "manual"),
+            quantity=payload.get("quantity"),
+            order_id=payload.get("order_id"),
         )
         self.db.add(record)
         self.db.commit()
@@ -48,6 +52,21 @@ class PositionRepository:
     def list_all(self) -> list[dict[str, Any]]:
         records = self.db.query(PositionDB).order_by(PositionDB.created_at.desc()).all()
         return [self._to_dict(r) for r in records]
+
+    def count_open(self, source: str | None = None) -> int:
+        q = self.db.query(PositionDB).filter(PositionDB.status == "open")
+        if source:
+            q = q.filter(PositionDB.source == source)
+        return q.count()
+
+    def get_open_for_ticker(self, ticker: str, source: str | None = None) -> dict[str, Any] | None:
+        q = self.db.query(PositionDB).filter(
+            PositionDB.ticker == ticker, PositionDB.status == "open"
+        )
+        if source:
+            q = q.filter(PositionDB.source == source)
+        record = q.first()
+        return self._to_dict(record) if record else None
 
     def close(self, position_id: str, exit_price: float, exit_reason: str) -> dict[str, Any] | None:
         record = self.db.query(PositionDB).filter(PositionDB.id == position_id).first()
@@ -97,6 +116,9 @@ class PositionRepository:
             "exit_reason": record.exit_reason,
             "return_pct": record.return_pct,
             "unrealized_return_pct": record.unrealized_return_pct,
+            "source": record.source,
+            "quantity": record.quantity,
+            "order_id": record.order_id,
         }
 
 
@@ -221,4 +243,49 @@ class ScanHistoryRepository:
             "results": json.loads(record.results_json),
             "skipped": json.loads(record.skipped_json),
             "count": record.count,
+        }
+
+
+class AutonomousEventRepository:
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        record = AutonomousEventDB(
+            ticker=payload["ticker"],
+            event_type=payload["event_type"],
+            price=payload.get("price"),
+            quantity=payload.get("quantity"),
+            buy_probability=payload.get("buy_probability"),
+            sell_probability=payload.get("sell_probability"),
+            mode=payload.get("mode", "paper"),
+            order_id=payload.get("order_id"),
+            reason=payload.get("reason"),
+        )
+        self.db.add(record)
+        self.db.commit()
+        self.db.refresh(record)
+        return self._to_dict(record)
+
+    def list_recent(self, limit: int = 100, ticker: str | None = None) -> list[dict[str, Any]]:
+        q = self.db.query(AutonomousEventDB)
+        if ticker:
+            q = q.filter(AutonomousEventDB.ticker == ticker)
+        records = q.order_by(AutonomousEventDB.id.desc()).limit(limit).all()
+        return [self._to_dict(r) for r in records]
+
+    @staticmethod
+    def _to_dict(record: AutonomousEventDB) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "ts": record.ts,
+            "ticker": record.ticker,
+            "event_type": record.event_type,
+            "price": record.price,
+            "quantity": record.quantity,
+            "buy_probability": record.buy_probability,
+            "sell_probability": record.sell_probability,
+            "mode": record.mode,
+            "order_id": record.order_id,
+            "reason": record.reason,
         }

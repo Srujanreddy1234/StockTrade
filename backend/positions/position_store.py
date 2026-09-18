@@ -33,6 +33,12 @@ class PositionStore:
     def list_all(self) -> list[dict[str, Any]]:
         return self._get_repo().list_all()
 
+    def count_open(self, source: str | None = None) -> int:
+        return self._get_repo().count_open(source)
+
+    def get_open_for_ticker(self, ticker: str, source: str | None = None) -> dict[str, Any] | None:
+        return self._get_repo().get_open_for_ticker(ticker, source)
+
     def close(
         self,
         position_id: str,
