@@ -1,5 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AnalyzeResponse, LearnTopic, Position, PositionsResponse, ScanResult, ScanResponse } from './types';
+import type {
+  AnalyzeResponse,
+  AutonomousEvent,
+  AutonomousEventsResponse,
+  AutonomousStatus,
+  LearnTopic,
+  Position,
+  PositionsResponse,
+  ScanResult,
+  ScanResponse,
+} from './types';
 import CandleChart from './CandleChart';
 import './App.css';
 
@@ -58,7 +68,7 @@ function App() {
   const [source, setSource] = useState(() => readLS(LS.source, 'synthetic'));
   const [ticker, setTicker] = useState(() => readLS(LS.ticker, 'RELIANCE.NS'));
   const [intervalVal, setIntervalVal] = useState(() => readLS(LS.interval, '1m'));
-  const [view, setView] = useState<'single' | 'scanner' | 'learn' | 'positions' | 'live'>('single');
+  const [view, setView] = useState<'single' | 'scanner' | 'learn' | 'positions' | 'live' | 'autonomous'>('single');
   const [scanData, setScanData] = useState<ScanResult[] | null>(null);
   const [scanLoading, setScanLoading] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -90,6 +100,13 @@ function App() {
     price: '',
     trigger_price: '',
   });
+
+  // Autonomous trading loop state
+  const [autoStatus, setAutoStatus] = useState<AutonomousStatus | null>(null);
+  const [autoEvents, setAutoEvents] = useState<AutonomousEvent[] | null>(null);
+  const [autoLoading, setAutoLoading] = useState(false);
+  const [autoError, setAutoError] = useState<string | null>(null);
+  const [killSwitchResetting, setKillSwitchResetting] = useState(false);
 
   const fetched = useRef(false);
 
@@ -270,6 +287,63 @@ function App() {
       setGrowwLoading(false);
     }
   };
+
+  const fetchAutoStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/autonomous/status`, { headers: apiHeaders });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json: AutonomousStatus = await res.json();
+      setAutoStatus(json);
+      setAutoError(null);
+    } catch (e: unknown) {
+      setAutoError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const fetchAutoEvents = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/autonomous/events?limit=200`, { headers: apiHeaders });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const json: AutonomousEventsResponse = await res.json();
+      setAutoEvents(json.events);
+      setAutoError(null);
+    } catch (e: unknown) {
+      setAutoError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const refreshAutonomous = async (showSpinner = false) => {
+    if (showSpinner) setAutoLoading(true);
+    await Promise.all([fetchAutoStatus(), fetchAutoEvents()]);
+    if (showSpinner) setAutoLoading(false);
+  };
+
+  const resetKillSwitch = async () => {
+    setKillSwitchResetting(true);
+    try {
+      const res = await fetch(`${API_BASE}/autonomous/kill-switch/reset`, {
+        method: 'POST',
+        headers: apiHeaders,
+      });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      await fetchAutoStatus();
+    } catch (e: unknown) {
+      setAutoError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setKillSwitchResetting(false);
+    }
+  };
+
+  // Poll the autonomous loop's status + events every 5s while that tab is
+  // open, so the dashboard feels live without hammering the backend on
+  // every single 1s tick the trader process makes internally.
+  useEffect(() => {
+    if (view !== 'autonomous') return;
+    refreshAutonomous(true);
+    const id = setInterval(() => refreshAutonomous(false), 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
 
   const placeGrowwOrder = async () => {
     setGrowwLoading(true);
@@ -1031,6 +1105,172 @@ function App() {
     );
   };
 
+  const eventBadgeColor = (type: string) => {
+    if (type === 'buy') return '#16a34a';
+    if (type === 'sell') return '#7c3aed';
+    if (type === 'error') return '#dc2626';
+    if (type === 'skip') return '#ca8a04';
+    return '#6b7280'; // observe
+  };
+
+  const parseReason = (reason: string | null) => {
+    if (!reason) return { structural: null as string | null, rest: '' };
+    const m = reason.match(/structural=([^/,]+)\/([^,]+)/);
+    return { structural: m ? `${m[1]}/${m[2]}` : null, rest: reason };
+  };
+
+  const probBar = (label: string, value: number | null, color: string) => (
+    <div className="prob-row">
+      <span className="prob-label">{label}</span>
+      <div className="prob-track">
+        <div
+          className="prob-fill"
+          style={{ width: `${Math.round((value ?? 0) * 100)}%`, background: color }}
+        />
+      </div>
+      <span className="prob-value">{value != null ? `${Math.round(value * 100)}%` : '—'}</span>
+    </div>
+  );
+
+  const renderAutonomous = () => {
+    if (autoLoading && !autoStatus) return <div className="positions-loading">Loading autonomous status…</div>;
+
+    const latestByTicker = new Map<string, AutonomousEvent>();
+    (autoEvents ?? []).forEach((e) => {
+      if (e.event_type !== 'observe') return;
+      const existing = latestByTicker.get(e.ticker);
+      if (!existing || e.id > existing.id) latestByTicker.set(e.ticker, e);
+    });
+
+    const killActive = autoStatus?.risk_state.kill_switch_active ?? false;
+    const pnl = autoStatus?.risk_state.realized_pnl_today ?? 0;
+
+    return (
+      <div className="autonomous">
+        {autoError && <div className="error">Error: {autoError}</div>}
+
+        {autoStatus && (
+          <div className="auto-summary">
+            <div className={`auto-summary-card mode-${autoStatus.mode}`}>
+              <span>Mode</span>
+              <strong>{autoStatus.mode === 'live' ? '🔴 LIVE (real orders)' : '🧪 PAPER (simulated)'}</strong>
+            </div>
+            <div className={`auto-summary-card ${killActive ? 'kill-active' : 'kill-ok'}`}>
+              <span>Kill switch</span>
+              <strong>{killActive ? 'ACTIVE — trading halted' : 'OK'}</strong>
+              {killActive && (
+                <button className="reset-btn" onClick={resetKillSwitch} disabled={killSwitchResetting}>
+                  {killSwitchResetting ? 'Resetting…' : 'Reset kill switch'}
+                </button>
+              )}
+              {killActive && autoStatus.risk_state.kill_switch_reason && (
+                <p className="kill-reason">{autoStatus.risk_state.kill_switch_reason}</p>
+              )}
+            </div>
+            <div className="auto-summary-card">
+              <span>Realized P&amp;L today</span>
+              <strong style={{ color: pnl >= 0 ? '#16a34a' : '#dc2626' }}>
+                {pnl >= 0 ? '+' : ''}{pnl.toFixed(2)}
+              </strong>
+            </div>
+            <div className="auto-summary-card">
+              <span>Open positions</span>
+              <strong>{autoStatus.open_autonomous_positions} / {autoStatus.risk_limits.max_open_positions}</strong>
+            </div>
+            <div className="auto-summary-card">
+              <span>Thresholds</span>
+              <strong>buy ≥ {Math.round(autoStatus.buy_probability_threshold * 100)}% · sell ≥ {Math.round(autoStatus.sell_probability_threshold * 100)}%</strong>
+            </div>
+          </div>
+        )}
+
+        <h3>Watchlist — live observations</h3>
+        {!autoEvents && <div className="autonomous-empty">Waiting for the autonomous loop to report in…</div>}
+        {autoEvents && latestByTicker.size === 0 && (
+          <div className="autonomous-empty">
+            No observations yet. Is <code>python -m backend.autonomous.trader</code> running, and is the market open?
+          </div>
+        )}
+        {latestByTicker.size > 0 && (
+          <div className="watchlist-grid">
+            {(autoStatus?.watchlist ?? Array.from(latestByTicker.keys())).map((ticker) => {
+              const obs = latestByTicker.get(ticker);
+              const { structural } = parseReason(obs?.reason ?? null);
+              return (
+                <div key={ticker} className="watchlist-card">
+                  <div className="watchlist-card-header">
+                    <strong>{ticker}</strong>
+                    <span className="watchlist-price">{obs?.price != null ? obs.price.toFixed(2) : '—'}</span>
+                  </div>
+                  {structural && <div className="watchlist-structural">{structural}</div>}
+                  {obs ? (
+                    <>
+                      {probBar('Buy', obs.buy_probability, '#16a34a')}
+                      {probBar('Sell', obs.sell_probability, '#dc2626')}
+                      <div className="watchlist-updated">
+                        updated {new Date(obs.ts).toLocaleTimeString()}
+                      </div>
+                    </>
+                  ) : (
+                    <div className="watchlist-updated">no data yet</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        <h3>Decision log</h3>
+        {autoEvents && autoEvents.length === 0 && (
+          <div className="autonomous-empty">No events logged yet.</div>
+        )}
+        {autoEvents && autoEvents.length > 0 && (
+          <div className="table-wrap">
+            <table className="event-log">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th>Ticker</th>
+                  <th>Event</th>
+                  <th>Price</th>
+                  <th>Qty</th>
+                  <th>Buy%</th>
+                  <th>Sell%</th>
+                  <th>Mode</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {autoEvents
+                  .filter((e) => e.event_type !== 'observe')
+                  .concat(autoEvents.filter((e) => e.event_type === 'observe').slice(0, 20))
+                  .sort((a, b) => b.id - a.id)
+                  .slice(0, 60)
+                  .map((e) => (
+                    <tr key={e.id}>
+                      <td>{new Date(e.ts).toLocaleTimeString()}</td>
+                      <td>{e.ticker}</td>
+                      <td>
+                        <span className="mini-badge" style={{ background: eventBadgeColor(e.event_type) }}>
+                          {e.event_type}
+                        </span>
+                      </td>
+                      <td>{e.price != null ? e.price.toFixed(2) : '—'}</td>
+                      <td>{e.quantity ?? '—'}</td>
+                      <td>{e.buy_probability != null ? Math.round(e.buy_probability * 100) : '—'}</td>
+                      <td>{e.sell_probability != null ? Math.round(e.sell_probability * 100) : '—'}</td>
+                      <td>{e.mode}</td>
+                      <td className="event-reason">{e.reason ?? '—'}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="app">
       <header className="topbar">
@@ -1084,6 +1324,12 @@ function App() {
               }}
             >
               Live
+            </button>
+            <button
+              className={view === 'autonomous' ? 'tab active' : 'tab'}
+              onClick={() => setView('autonomous')}
+            >
+              Autonomous
             </button>
           </div>
 
@@ -1154,6 +1400,8 @@ function App() {
         renderPositions()
       ) : view === 'live' ? (
         renderLive()
+      ) : view === 'autonomous' ? (
+        renderAutonomous()
       ) : (
         <div className="layout">
           <div className="main-col">

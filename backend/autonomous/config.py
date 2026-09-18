@@ -88,6 +88,11 @@ class AutonomousConfig:
     # Kill-switch state file (survives process restarts within a trading day).
     state_path: str = os.environ.get("AUTOTRADE_STATE_PATH", "./autotrade_state.json")
 
+    # How often (seconds) to log a plain "observe" event per ticker, purely
+    # so the frontend has something live to poll between actual trades. Logged
+    # far less often than the 1s tick rate to keep the audit table small.
+    observe_log_seconds: float = _env_float("AUTOTRADE_OBSERVE_LOG_SECONDS", 10.0)
+
 
 def load_config() -> AutonomousConfig:
     return AutonomousConfig()

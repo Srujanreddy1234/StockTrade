@@ -87,6 +87,7 @@ class AutonomousTrader:
         self.pipeline_cache: dict[str, PipelineSnapshot] = {
             t: PipelineSnapshot() for t in self.config.watchlist
         }
+        self._last_observed_at: dict[str, float] = {t: 0.0 for t in self.config.watchlist}
         self._stop = asyncio.Event()
         logger.info(
             "Autonomous trader initialized in %s mode, watchlist=%s",
@@ -153,6 +154,23 @@ class AutonomousTrader:
         if time.time() - snapshot.refreshed_at > self.config.pipeline_refresh_seconds:
             snapshot = await asyncio.to_thread(self._refresh_pipeline_sync, ticker)
             self.pipeline_cache[ticker] = snapshot
+
+        now = time.time()
+        if signal.ready and now - self._last_observed_at[ticker] > self.config.observe_log_seconds:
+            self._last_observed_at[ticker] = now
+            log_event(
+                ticker=ticker,
+                event_type="observe",
+                price=price,
+                buy_probability=signal.buy_probability,
+                sell_probability=signal.sell_probability,
+                mode=self.execution.mode,
+                reason=(
+                    f"structural={snapshot.status}/{snapshot.direction}, "
+                    f"range_position={signal.range_position}, rsi={signal.rsi:.1f}, "
+                    f"target1={snapshot.target1}, invalidation={snapshot.invalidation}"
+                ),
+            )
 
         open_position = position_store.get_open_for_ticker(ticker, source="autonomous")
 

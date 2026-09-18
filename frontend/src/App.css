@@ -1005,3 +1005,143 @@ th {
   color: var(--text-secondary);
   font-size: 14px;
 }
+
+/* ---- Autonomous trading dashboard ---- */
+.autonomous h3 {
+  margin: 24px 0 12px;
+}
+.auto-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+.auto-summary-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.auto-summary-card span {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.auto-summary-card strong {
+  font-size: 16px;
+}
+.auto-summary-card.mode-live {
+  border-color: var(--red);
+  background: #fef2f2;
+}
+.auto-summary-card.kill-active {
+  border-color: var(--red);
+  background: #fef2f2;
+}
+.auto-summary-card.kill-ok strong {
+  color: var(--green);
+}
+.kill-reason {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin: 0;
+}
+.reset-btn {
+  align-self: flex-start;
+  background: var(--red);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.reset-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.watchlist-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.watchlist-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  box-shadow: var(--shadow);
+}
+.watchlist-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+.watchlist-price {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+.watchlist-structural {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+}
+.watchlist-updated {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+}
+.prob-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+}
+.prob-label {
+  width: 32px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.prob-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 4px;
+  background: var(--border);
+  overflow: hidden;
+}
+.prob-fill {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}
+.prob-value {
+  width: 36px;
+  text-align: right;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.autonomous-empty {
+  color: var(--text-secondary);
+  font-size: 14px;
+  padding: 12px 0;
+}
+
+.event-log {
+  font-size: 13px;
+}
+.event-reason {
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  max-width: 320px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

@@ -183,6 +183,52 @@ export interface GrowwMargin {
   available_margin: number;
 }
 
+export interface AutonomousRiskLimits {
+  max_capital_per_trade_pct: number;
+  max_capital_per_trade_abs: number;
+  daily_loss_limit_pct: number;
+  max_open_positions: number;
+  cooldown_minutes: number;
+}
+
+export interface AutonomousRiskState {
+  date: string;
+  day_start_margin: number | null;
+  realized_pnl_today: number;
+  kill_switch_active: boolean;
+  kill_switch_reason: string | null;
+}
+
+export interface AutonomousStatus {
+  mode: 'paper' | 'live';
+  watchlist: string[];
+  tick_interval_seconds: number;
+  pipeline_refresh_seconds: number;
+  buy_probability_threshold: number;
+  sell_probability_threshold: number;
+  risk_limits: AutonomousRiskLimits;
+  risk_state: AutonomousRiskState;
+  open_autonomous_positions: number;
+}
+
+export interface AutonomousEvent {
+  id: number;
+  ts: string;
+  ticker: string;
+  event_type: 'buy' | 'sell' | 'skip' | 'error' | 'observe';
+  price: number | null;
+  quantity: number | null;
+  buy_probability: number | null;
+  sell_probability: number | null;
+  mode: 'paper' | 'live';
+  order_id: string | null;
+  reason: string | null;
+}
+
+export interface AutonomousEventsResponse {
+  events: AutonomousEvent[];
+}
+
 export interface GrowwOrder {
   order_id: string;
   trading_symbol: string;
