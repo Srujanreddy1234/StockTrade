@@ -75,9 +75,9 @@ class GrowwClient:
 
     def get_orders(self) -> list[dict[str, Any]]:
         try:
-            response = self._get_api().get_all_orders_for_user(timeout=15)
+            response = self._get_api().get_order_list(timeout=15)
             if isinstance(response, dict):
-                return response.get("orders", [])
+                return response.get("order_list", response.get("orders", []))
             return response or []
         except Exception as exc:
             raise GrowwClientError(f"Failed to fetch orders: {exc}") from exc
