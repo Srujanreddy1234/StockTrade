@@ -23,6 +23,7 @@ from backend.zones.zone_engine import add_reference_levels, add_zone_columns
 from backend.breakouts.breakout_engine import add_breakout_events
 from backend.pullback.pullback_engine import add_pullback_reversal_events
 from backend.volume.volume_engine import add_volume_vwap_intelligence
+from backend.setup.setup_engine import add_setup_confluence
 
 
 def run_pipeline(df: pd.DataFrame, timeframe: str = "unknown") -> pd.DataFrame:
@@ -49,6 +50,7 @@ def run_pipeline(df: pd.DataFrame, timeframe: str = "unknown") -> pd.DataFrame:
     df = add_volume_vwap_intelligence(df)
     df = add_scores(df)
     df = add_risk_levels(df)
+    df = add_setup_confluence(df)
     return df
 
 

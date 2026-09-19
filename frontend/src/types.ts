@@ -30,6 +30,10 @@ export interface Explanation {
   message: string | null;
   validated: string | null;
   validation_note: string | null;
+  confluence_score: number | null;
+  confluence_status: string | null;
+  confluence_direction: string | null;
+  confluence_reasons: string[];
 }
 
 export interface HistoryRow {

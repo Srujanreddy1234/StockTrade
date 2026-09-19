@@ -4,6 +4,7 @@ import type {
   AutonomousEvent,
   AutonomousEventsResponse,
   AutonomousStatus,
+  Explanation,
   LearnTopic,
   Position,
   PositionsResponse,
@@ -464,6 +465,42 @@ function App() {
     return p.toFixed(2);
   };
 
+  const confluenceColor = (status: string | null) => {
+    if (status === 'ENTRY') return '#16a34a';
+    if (status === 'WATCH') return '#ca8a04';
+    return '#6b7280';
+  };
+
+  const renderConfluence = (ex: Explanation) => {
+    if (!ex.confluence_status) return null;
+    const downgraded = ex.status !== ex.confluence_status;
+    return (
+      <div className="confluence-panel">
+        <div className="confluence-header">
+          <span
+            className="confluence-badge"
+            style={{ background: confluenceColor(ex.confluence_status) }}
+          >
+            Confluence: {ex.confluence_status}
+          </span>
+          <span className="confluence-score">{ex.confluence_score ?? 0}/100</span>
+        </div>
+        {downgraded && (
+          <p className="confluence-downgrade-note">
+            Base setup was {ex.status}, but structure/zone/breakout/pullback/volume/VWAP
+            engines {ex.confluence_status === 'NO TRADE' ? 'contradicted it' : "didn't fully corroborate it"} —
+            downgraded to {ex.confluence_status}.
+          </p>
+        )}
+        <ul className="confluence-reasons">
+          {(ex.confluence_reasons || []).map((r: string, i: number) => (
+            <li key={i}>{r}</li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
+
   const renderExplanation = () => {
     if (!data) return null;
     const ex = data.explanation;
@@ -527,6 +564,7 @@ function App() {
                 <p>{ex.validation_note}</p>
               </div>
             )}
+            {renderConfluence(ex)}
             <button className="paper-enter-btn" onClick={openPosition} disabled={openPositionLoading}>
               {openPositionLoading ? 'Entering…' : 'Enter this trade (paper)'}
             </button>
@@ -596,6 +634,7 @@ function App() {
                 <p>{ex.validation_note}</p>
               </div>
             )}
+            {renderConfluence(ex)}
           </div>
         </div>
       );
@@ -640,6 +679,7 @@ function App() {
             </p>
           )}
           <p className="no-trade-msg">No trade — insufficient confirmation</p>
+          {renderConfluence(ex)}
         </div>
       </div>
     );

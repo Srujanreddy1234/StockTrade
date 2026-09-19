@@ -330,6 +330,53 @@ body {
   margin: 0;
 }
 
+.confluence-panel {
+  padding: 12px;
+  border-radius: 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
+.confluence-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.confluence-badge {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.confluence-score {
+  font-weight: 600;
+  color: #334155;
+}
+
+.confluence-downgrade-note {
+  color: #92400e;
+  margin: 0 0 6px;
+}
+
+.confluence-reasons {
+  margin: 0;
+  padding-left: 18px;
+  color: #475569;
+}
+
+.confluence-reasons li {
+  margin-bottom: 2px;
+}
+
 .chart-card {
   background: var(--card-bg);
   border: 1px solid var(--border);

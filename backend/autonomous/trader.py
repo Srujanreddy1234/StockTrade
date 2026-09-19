@@ -56,6 +56,8 @@ class PipelineSnapshot:
     direction: str | None = None
     target1: float | None = None
     invalidation: float | None = None
+    confluence_score: float | None = None
+    confluence_reasons: list[str] = field(default_factory=list)
     refreshed_at: float = 0.0
 
 
@@ -130,11 +132,22 @@ class AutonomousTrader:
                 return self.pipeline_cache[ticker]
             df = run_pipeline(df)
             last = df.iloc[-1]
+            # Use the confluence engine's verdict (Step 15), not the raw
+            # scoring_engine status/direction directly: confluence can only
+            # confirm or downgrade the base setup after checking market
+            # structure, S/R zones, breakouts, pullback/reversal, volume and
+            # VWAP against it, so an ENTRY here has independent corroboration
+            # from those engines rather than resting on the pattern+trend
+            # score alone.
             return PipelineSnapshot(
-                status=str(last.get("status")),
-                direction=(last.get("direction") or None),
+                status=str(last.get("confluence_status")),
+                direction=(last.get("confluence_direction") or None),
                 target1=float(last["target1"]) if not _isnan(last.get("target1")) else None,
                 invalidation=float(last["invalidation"]) if not _isnan(last.get("invalidation")) else None,
+                confluence_score=(
+                    float(last["confluence_score"]) if not _isnan(last.get("confluence_score")) else None
+                ),
+                confluence_reasons=list(last.get("confluence_reasons") or []),
                 refreshed_at=time.time(),
             )
         except Exception:
@@ -166,7 +179,8 @@ class AutonomousTrader:
                 sell_probability=signal.sell_probability,
                 mode=self.execution.mode,
                 reason=(
-                    f"structural={snapshot.status}/{snapshot.direction}, "
+                    f"structural={snapshot.status}/{snapshot.direction} "
+                    f"(confluence={snapshot.confluence_score}, {'; '.join(snapshot.confluence_reasons) or 'no corroboration'}), "
                     f"range_position={signal.range_position}, rsi={signal.rsi:.1f}, "
                     f"target1={snapshot.target1}, invalidation={snapshot.invalidation}"
                 ),
@@ -236,7 +250,11 @@ class AutonomousTrader:
             sell_probability=signal.sell_probability,
             mode=fill.mode,
             order_id=fill.order_id,
-            reason=f"structural={snapshot.status}/{snapshot.direction}, target1={snapshot.target1}, invalidation={snapshot.invalidation}",
+            reason=(
+                f"structural={snapshot.status}/{snapshot.direction}, target1={snapshot.target1}, "
+                f"invalidation={snapshot.invalidation}, confluence_score={snapshot.confluence_score}, "
+                f"confirmed_by=[{'; '.join(snapshot.confluence_reasons)}]"
+            ),
         )
         logger.info("BUY %s x%s @ %.2f (buy_p=%.2f)", ticker, fill.quantity, fill.price, signal.buy_probability)
 

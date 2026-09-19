@@ -661,6 +661,52 @@ def volume_vwap(
     }
 
 
+@app.get("/setup/{ticker}")
+def setup_confluence(
+    ticker: str,
+    interval: str = Query("1d"),
+    period: str = Query("2y"),
+    limit: int = Query(50),
+):
+    """Return the unified setup confluence verdict for a ticker: whether the
+    base pattern+trend+risk/reward setup (status/direction) is independently
+    corroborated by market structure, support/resistance zones, breakouts,
+    pullback/reversal, volume and VWAP. This is the same verdict the
+    autonomous trader uses to gate real entries -- confluence can only
+    confirm or downgrade the base setup, never invent one.
+    """
+    from backend.setup.setup_engine import get_setup_events
+
+    try:
+        df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}"
+        )
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data returned for '{ticker}' ({interval}).")
+
+    df = run_pipeline(df, timeframe=interval)
+    events = get_setup_events(df, timeframe=interval)
+    events.reverse()
+    last = df.iloc[-1]
+    return {
+        "ticker": ticker,
+        "interval": interval,
+        "snapshot": {
+            "status": last.get("status"),
+            "direction": last.get("direction"),
+            "confluence_status": last.get("confluence_status"),
+            "confluence_direction": last.get("confluence_direction"),
+            "confluence_score": round(float(last["confluence_score"]), 1)
+            if not pd.isna(last.get("confluence_score"))
+            else None,
+            "confluence_reasons": last.get("confluence_reasons") or [],
+        },
+        "events": events[:limit],
+    }
+
+
 @app.get("/alignment/{ticker}")
 def alignment(ticker: str):
     """Return multi-timeframe trend alignment for a ticker."""

@@ -153,4 +153,8 @@ def explain(df: pd.DataFrame, loc) -> dict:
         "status_reason": row.get("status_reason", None),
         "status": row.get("status", None),
         "validated": validated,
+        "confluence_score": row.get("confluence_score", None),
+        "confluence_status": row.get("confluence_status", None),
+        "confluence_direction": row.get("confluence_direction", None),
+        "confluence_reasons": row.get("confluence_reasons", None) or [],
     }
