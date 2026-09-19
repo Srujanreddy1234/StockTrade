@@ -13,6 +13,7 @@ from backend.db.models import (
     AutonomousEventDB,
     BacktestRunDB,
     OHLCVCacheDB,
+    OrderDB,
     PositionDB,
     ScanHistoryDB,
 )
@@ -25,6 +26,7 @@ class PositionRepository:
     def create(self, payload: dict[str, Any]) -> dict[str, Any]:
         position_id = payload.get("id") or str(__import__("uuid").uuid4())
         now = datetime.now(timezone.utc).isoformat()
+        quantity = payload.get("quantity")
         record = PositionDB(
             id=position_id,
             ticker=payload["ticker"],
@@ -37,10 +39,55 @@ class PositionRepository:
             status="open",
             unrealized_return_pct=0.0,
             source=payload.get("source", "manual"),
-            quantity=payload.get("quantity"),
+            quantity=quantity,
             order_id=payload.get("order_id"),
+            initial_quantity=payload.get("initial_quantity", quantity),
+            realized_pnl=0.0,
         )
         self.db.add(record)
+        self.db.commit()
+        self.db.refresh(record)
+        return self._to_dict(record)
+
+    def reduce_quantity(
+        self,
+        position_id: str,
+        filled_qty: int,
+        fill_price: float,
+        exit_reason: str = "partial_exit",
+    ) -> dict[str, Any] | None:
+        """Apply a confirmed (partial or final) exit fill to an open position.
+
+        Adds this fill's realized P&L to the running total, decrements the
+        remaining quantity, and only marks the position fully 'closed' once
+        the remaining quantity reaches zero -- using the cumulative realized
+        P&L (not a single exit price) for the final return_pct, since a
+        position may have been closed across several fills at different
+        prices.
+        """
+        record = self.db.query(PositionDB).filter(PositionDB.id == position_id).first()
+        if not record or record.status != "open":
+            return None
+
+        current_qty = int(record.quantity or 0)
+        filled_qty = min(int(filled_qty), current_qty) if current_qty > 0 else int(filled_qty)
+        sign = 1 if record.direction == "bullish" else -1
+        pnl_delta = sign * (fill_price - record.entry_price) * filled_qty
+        record.realized_pnl = float(record.realized_pnl or 0.0) + pnl_delta
+        record.quantity = max(0, current_qty - filled_qty)
+
+        if record.quantity <= 0:
+            initial_qty = record.initial_quantity or (current_qty + filled_qty) or 1
+            cost_basis = record.entry_price * initial_qty
+            record.status = "closed"
+            record.exit_price = float(fill_price)
+            record.exit_date = datetime.now(timezone.utc).isoformat()
+            record.exit_reason = exit_reason
+            record.return_pct = (
+                round((record.realized_pnl / cost_basis) * 100, 2) if cost_basis else 0.0
+            )
+            record.unrealized_return_pct = 0.0
+
         self.db.commit()
         self.db.refresh(record)
         return self._to_dict(record)
@@ -119,7 +166,148 @@ class PositionRepository:
             "source": record.source,
             "quantity": record.quantity,
             "order_id": record.order_id,
+            "initial_quantity": record.initial_quantity,
+            "realized_pnl": record.realized_pnl,
         }
+
+
+class OrderRepository:
+    """Persistence for the broker order lifecycle (see backend/orders/order_manager.py).
+
+    Deliberately dumb: this layer only reads/writes rows. All state-machine
+    logic (what transition is valid, how to normalize a broker response)
+    lives in OrderManager so it can be unit tested without a database.
+    """
+
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def create(self, payload: dict[str, Any]) -> dict[str, Any]:
+        order_id = payload.get("id") or str(__import__("uuid").uuid4())
+        record = OrderDB(
+            id=order_id,
+            decision_id=payload["decision_id"],
+            order_reference_id=payload.get("order_reference_id"),
+            broker_order_id=payload.get("broker_order_id"),
+            ticker=payload["ticker"],
+            exchange=payload["exchange"],
+            segment=payload.get("segment", "CASH"),
+            side=payload["side"],
+            order_type=payload["order_type"],
+            product=payload["product"],
+            requested_quantity=int(payload["requested_quantity"]),
+            filled_quantity=int(payload.get("filled_quantity", 0)),
+            remaining_quantity=int(payload.get("remaining_quantity", payload["requested_quantity"])),
+            requested_price=payload.get("requested_price"),
+            average_fill_price=payload.get("average_fill_price"),
+            status=payload.get("status", "CREATED"),
+            mode=payload.get("mode", "paper"),
+            setup_reference=json.dumps(payload["setup_reference"]) if payload.get("setup_reference") else None,
+        )
+        self.db.add(record)
+        self.db.commit()
+        self.db.refresh(record)
+        return self._to_dict(record)
+
+    def get(self, order_id: str) -> dict[str, Any] | None:
+        record = self.db.query(OrderDB).filter(OrderDB.id == order_id).first()
+        return self._to_dict(record) if record else None
+
+    def get_by_reference(self, order_reference_id: str) -> dict[str, Any] | None:
+        record = (
+            self.db.query(OrderDB)
+            .filter(OrderDB.order_reference_id == order_reference_id)
+            .first()
+        )
+        return self._to_dict(record) if record else None
+
+    def get_open_for_decision(self, decision_id: str) -> dict[str, Any] | None:
+        """Any order for this decision that is not yet in a terminal state --
+        used as the duplicate-submission guard before creating a new order.
+        """
+        record = (
+            self.db.query(OrderDB)
+            .filter(OrderDB.decision_id == decision_id, OrderDB.status.in_(_NON_TERMINAL_STATES))
+            .first()
+        )
+        return self._to_dict(record) if record else None
+
+    def get_in_flight_for_ticker_side(self, ticker: str, side: str) -> dict[str, Any] | None:
+        record = (
+            self.db.query(OrderDB)
+            .filter(
+                OrderDB.ticker == ticker,
+                OrderDB.side == side,
+                OrderDB.status.in_(_NON_TERMINAL_STATES),
+            )
+            .first()
+        )
+        return self._to_dict(record) if record else None
+
+    def list_non_terminal(self) -> list[dict[str, Any]]:
+        records = self.db.query(OrderDB).filter(OrderDB.status.in_(_NON_TERMINAL_STATES)).all()
+        return [self._to_dict(r) for r in records]
+
+    def list_recent(self, limit: int = 50, ticker: str | None = None) -> list[dict[str, Any]]:
+        q = self.db.query(OrderDB)
+        if ticker:
+            q = q.filter(OrderDB.ticker == ticker)
+        records = q.order_by(OrderDB.created_at.desc()).limit(limit).all()
+        return [self._to_dict(r) for r in records]
+
+    def update(self, order_id: str, changes: dict[str, Any]) -> dict[str, Any] | None:
+        record = self.db.query(OrderDB).filter(OrderDB.id == order_id).first()
+        if not record:
+            return None
+        for key, value in changes.items():
+            if key == "setup_reference" and value is not None:
+                value = json.dumps(value)
+            setattr(record, key, value)
+        self.db.commit()
+        self.db.refresh(record)
+        return self._to_dict(record)
+
+    @staticmethod
+    def _to_dict(record: OrderDB) -> dict[str, Any]:
+        return {
+            "id": record.id,
+            "decision_id": record.decision_id,
+            "order_reference_id": record.order_reference_id,
+            "broker_order_id": record.broker_order_id,
+            "ticker": record.ticker,
+            "exchange": record.exchange,
+            "segment": record.segment,
+            "side": record.side,
+            "order_type": record.order_type,
+            "product": record.product,
+            "requested_quantity": record.requested_quantity,
+            "filled_quantity": record.filled_quantity,
+            "remaining_quantity": record.remaining_quantity,
+            "requested_price": record.requested_price,
+            "average_fill_price": record.average_fill_price,
+            "status": record.status,
+            "error_category": record.error_category,
+            "error_message": record.error_message,
+            "mode": record.mode,
+            "setup_reference": json.loads(record.setup_reference) if record.setup_reference else None,
+            "position_id": record.position_id,
+            "created_at": record.created_at,
+            "submitted_at": record.submitted_at,
+            "last_checked_at": record.last_checked_at,
+            "terminal_at": record.terminal_at,
+            "updated_at": record.updated_at,
+        }
+
+
+_NON_TERMINAL_STATES = (
+    "CREATED",
+    "SUBMITTING",
+    "SUBMITTED",
+    "PENDING",
+    "PARTIALLY_FILLED",
+    "CANCEL_PENDING",
+    "UNKNOWN",
+)
 
 
 class BacktestRunRepository:

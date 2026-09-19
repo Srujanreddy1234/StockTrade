@@ -41,11 +41,14 @@ from backend.autonomous.risk_manager import RiskManager
 from backend.autonomous.tick_stats import TickerTickState, new_state
 from backend.data_engine.loader import load_from_yfinance
 from backend.db.engine import SessionLocal
-from backend.db.repository import AutonomousEventRepository
+from backend.db.repository import AutonomousEventRepository, OrderRepository
 from backend.groww.auth import GrowwAuthError
 from backend.groww.client import GrowwClientError, get_client
+from backend.orders.order_manager import CANCELLED, FAILED, FILLED, PARTIALLY_FILLED, REJECTED
 from backend.pipeline import run_pipeline
 from backend.positions.position_store import position_store
+
+_ORDER_TERMINAL_STATES = (FILLED, PARTIALLY_FILLED, REJECTED, CANCELLED, FAILED)
 
 logger = logging.getLogger("autonomous.trader")
 
@@ -211,6 +214,13 @@ class AutonomousTrader:
         if not structural_ok or signal.buy_probability < self.config.buy_probability_threshold:
             return
 
+        # Persisted duplicate-order guard: survives a process restart because
+        # it queries the orders table, not in-memory state. A ticker with an
+        # already-working BUY (any non-terminal state, including one left
+        # UNKNOWN by a lost response) is never given a second one.
+        if self.execution.has_in_flight_order(ticker, "BUY"):
+            return
+
         open_count = position_store.count_open(source="autonomous")
         can_open, reason = self.risk.can_open_new_position(ticker, open_count)
         if not can_open:
@@ -229,34 +239,47 @@ class AutonomousTrader:
         if quantity <= 0:
             return
 
+        # decision_id ties this specific structural setup (identified by
+        # which pipeline refresh produced it) to its order, so a retried
+        # call for the SAME setup is idempotent (create_order returns the
+        # existing non-terminal order instead of submitting a second one).
+        decision_id = f"{ticker}:BUY:{int(snapshot.refreshed_at)}"
+        setup_reference = {
+            "confluence_status": snapshot.status,
+            "confluence_score": snapshot.confluence_score,
+            "confluence_reasons": snapshot.confluence_reasons,
+            "target1": snapshot.target1,
+            "invalidation": snapshot.invalidation,
+            "interval": self.config.candle_interval,
+        }
+
         try:
-            fill = await asyncio.to_thread(self.execution.buy, ticker, quantity, price)
+            order = await asyncio.to_thread(
+                self.execution.submit_and_confirm,
+                decision_id, ticker, "BUY", quantity, price, setup_reference,
+            )
         except Exception as exc:
-            logger.exception("Buy failed for %s", ticker)
+            logger.exception("Buy order flow failed for %s", ticker)
             log_event(
                 ticker=ticker, event_type="error", price=price, mode=self.execution.mode, reason=str(exc)
             )
             return
 
-        self.execution.open_position_record(
-            ticker, fill, snapshot.target1, snapshot.invalidation, self.config.candle_interval
-        )
         log_event(
             ticker=ticker,
-            event_type="buy",
-            price=fill.price,
-            quantity=fill.quantity,
+            event_type="order_submitted",
+            price=price,
             buy_probability=signal.buy_probability,
             sell_probability=signal.sell_probability,
-            mode=fill.mode,
-            order_id=fill.order_id,
+            mode=order["mode"],
+            order_id=order.get("broker_order_id") or order["id"],
             reason=(
-                f"structural={snapshot.status}/{snapshot.direction}, target1={snapshot.target1}, "
-                f"invalidation={snapshot.invalidation}, confluence_score={snapshot.confluence_score}, "
+                f"status={order['status']}, structural={snapshot.status}/{snapshot.direction}, "
+                f"confluence_score={snapshot.confluence_score}, "
                 f"confirmed_by=[{'; '.join(snapshot.confluence_reasons)}]"
             ),
         )
-        logger.info("BUY %s x%s @ %.2f (buy_p=%.2f)", ticker, fill.quantity, fill.price, signal.buy_probability)
+        self._finalize_order(order)
 
     async def _maybe_exit(self, ticker: str, price: float, signal: ProbabilitySignal, position: dict) -> None:
         reason = None
@@ -274,32 +297,127 @@ class AutonomousTrader:
         if quantity <= 0:
             return
 
+        if self.execution.has_in_flight_order(ticker, "SELL"):
+            return
+
+        decision_id = f"{ticker}:SELL:{position['id']}"
+        setup_reference = {"reason": reason}
+
         try:
-            fill = await asyncio.to_thread(self.execution.sell, ticker, quantity, price)
+            order = await asyncio.to_thread(
+                self.execution.submit_and_confirm,
+                decision_id, ticker, "SELL", quantity, price, setup_reference,
+            )
         except Exception as exc:
-            logger.exception("Sell failed for %s", ticker)
+            logger.exception("Sell order flow failed for %s", ticker)
             log_event(
                 ticker=ticker, event_type="error", price=price, mode=self.execution.mode, reason=str(exc)
             )
             return
 
-        self.execution.close_position_record(position["id"], fill.price, reason)
-        realized_pnl = (fill.price - position["entry_price"]) * quantity
-        self.risk.record_realized_pnl(realized_pnl)
-        self.risk.record_position_closed(ticker)
+        # Link the order to the position it is meant to exit BEFORE
+        # finalizing, so a later reconciliation pass (if this order didn't
+        # reach a terminal state within the bounded poll above) still knows
+        # which position to reduce once it does.
+        db = SessionLocal()
+        try:
+            order = OrderRepository(db).update(order["id"], {"position_id": position["id"]})
+        finally:
+            db.close()
+
+        log_event(
+            ticker=ticker,
+            event_type="order_submitted",
+            price=price,
+            buy_probability=signal.buy_probability,
+            sell_probability=signal.sell_probability,
+            mode=order["mode"],
+            order_id=order.get("broker_order_id") or order["id"],
+            reason=f"status={order['status']}, exit_reason={reason}",
+        )
+        self._finalize_order(order)
+
+    def _finalize_order(self, order: dict) -> None:
+        """Apply a (possibly just-reconciled) order's confirmed fill to the
+        position layer. Only ever acts on FILLED/PARTIALLY_FILLED orders
+        with filled_quantity > 0 -- a bare "place_order() didn't raise" is
+        never sufficient here, only a broker-confirmed fill is. Safe to call
+        more than once for the same order: a BUY only creates a position the
+        first time (guarded by order['position_id'] already being set), and
+        a SELL is only processed while its linked position is still open.
+        """
+        status = order.get("status")
+        ticker = order["ticker"]
+
+        if status in (REJECTED, CANCELLED, FAILED):
+            log_event(
+                ticker=ticker,
+                event_type=f"order_{status.lower()}",
+                mode=order["mode"],
+                order_id=order.get("broker_order_id") or order["id"],
+                reason=order.get("error_message") or status,
+            )
+            return
+
+        if status not in (FILLED, PARTIALLY_FILLED) or int(order.get("filled_quantity") or 0) <= 0:
+            return
+
+        setup_reference = order.get("setup_reference") or {}
+
+        if order["side"] == "BUY":
+            if order.get("position_id"):
+                return  # already finalized
+            fill_price = order.get("average_fill_price")
+            if fill_price is None:
+                return
+            position = self.execution.open_position_record(
+                ticker, order,
+                setup_reference.get("target1"), setup_reference.get("invalidation"),
+                setup_reference.get("interval", self.config.candle_interval),
+            )
+            db = SessionLocal()
+            try:
+                OrderRepository(db).update(order["id"], {"position_id": position["id"]})
+            finally:
+                db.close()
+            log_event(
+                ticker=ticker,
+                event_type="buy",
+                price=fill_price,
+                quantity=order["filled_quantity"],
+                mode=order["mode"],
+                order_id=order.get("broker_order_id") or order["id"],
+                reason=f"order {status}; confluence_score={setup_reference.get('confluence_score')}",
+            )
+            logger.info("BUY %s x%s @ %.2f (order %s)", ticker, order["filled_quantity"], fill_price, status)
+            return
+
+        # SELL
+        position_id = order.get("position_id")
+        if not position_id:
+            return
+        before = position_store.get(position_id)
+        if not before or before["status"] != "open":
+            return
+        updated = self.execution.apply_exit_fill(position_id, order, reason=setup_reference.get("reason", "exit"))
+        if updated is None:
+            return
+        pnl_delta = float(updated.get("realized_pnl") or 0.0) - float(before.get("realized_pnl") or 0.0)
+        self.risk.record_realized_pnl(pnl_delta)
+        if updated["status"] == "closed":
+            self.risk.record_position_closed(ticker)
         log_event(
             ticker=ticker,
             event_type="sell",
-            price=fill.price,
-            quantity=fill.quantity,
-            buy_probability=signal.buy_probability,
-            sell_probability=signal.sell_probability,
-            mode=fill.mode,
-            order_id=fill.order_id,
-            reason=reason,
+            price=order.get("average_fill_price"),
+            quantity=order["filled_quantity"],
+            mode=order["mode"],
+            order_id=order.get("broker_order_id") or order["id"],
+            reason=f"{setup_reference.get('reason', 'exit')} (position {updated['status']}, realized_pnl_delta={pnl_delta:.2f})",
         )
         logger.info(
-            "SELL %s x%s @ %.2f (%s), realized_pnl=%.2f", ticker, fill.quantity, fill.price, reason, realized_pnl
+            "SELL %s x%s (order %s), position now %s, realized_pnl_delta=%.2f",
+            ticker, order["filled_quantity"], status, updated["status"], pnl_delta,
         )
 
     async def run_forever(self) -> None:
@@ -315,6 +433,17 @@ class AutonomousTrader:
                 logger.warning("Kill switch active: %s", self.risk.state.kill_switch_reason)
                 await asyncio.sleep(self.config.tick_interval_seconds)
                 continue
+
+            # Advance any order left non-terminal by a previous iteration
+            # (bounded poll timeout, or a lost response marked UNKNOWN) --
+            # this is what recovers state across a stuck request without
+            # blocking the per-ticker tick loop below, and what makes order
+            # state recoverable across a full process restart, since these
+            # rows come from the database, not in-memory state.
+            advanced = await asyncio.to_thread(self.execution.reconcile_pending_orders)
+            for order in advanced:
+                if order.get("status") in _ORDER_TERMINAL_STATES:
+                    self._finalize_order(order)
 
             start = time.time()
             await asyncio.gather(

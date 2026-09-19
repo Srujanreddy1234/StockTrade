@@ -39,7 +39,65 @@ class PositionDB(Base):
     source = Column(String, nullable=False, default="manual")
     quantity = Column(Integer, nullable=True)
     order_id = Column(String, nullable=True)
+    # Quantity as originally opened, kept even as `quantity` is decremented by
+    # partial exits, so a correct return_pct can be computed from cumulative
+    # realized_pnl once the position is fully closed. Nullable for rows
+    # created before this column existed; readers fall back to `quantity`.
+    initial_quantity = Column(Integer, nullable=True)
+    # Cumulative realized P&L (in price units, i.e. rupees, not %) from any
+    # partial exits applied so far. Added to on each partial fill of a SELL
+    # (or BUY, for a bearish position) against this position.
+    realized_pnl = Column(Float, nullable=False, default=0.0)
     created_at = Column(String, default=lambda: utcnow().isoformat())
+    updated_at = Column(String, default=lambda: utcnow().isoformat(), onupdate=lambda: utcnow().isoformat())
+
+
+class OrderDB(Base):
+    """A broker order and its full lifecycle, tracked independently of the
+    position it may eventually produce. A position is only created/updated
+    once an order reaches a fill-confirmed state -- see
+    backend/orders/order_manager.py for the state machine.
+
+    Terminal states: FILLED, REJECTED, CANCELLED, FAILED. Non-terminal:
+    CREATED, SUBMITTING, SUBMITTED, PENDING, PARTIALLY_FILLED,
+    CANCEL_PENDING, UNKNOWN.
+    """
+
+    __tablename__ = "orders"
+
+    id = Column(String, primary_key=True, index=True)  # internal order id (uuid)
+    # Identifies the single trading decision that produced this order, so a
+    # retry/resubmission attempt can check "does an order for this decision
+    # already exist?" instead of blindly submitting again.
+    decision_id = Column(String, nullable=False, index=True)
+    # Sent to Groww as order_reference_id (the SDK's own idempotency
+    # parameter) so a lost-response order can be looked up by reference
+    # even without knowing the broker's own order id yet.
+    order_reference_id = Column(String, nullable=True, index=True)
+    broker_order_id = Column(String, nullable=True, index=True)
+    ticker = Column(String, nullable=False, index=True)
+    exchange = Column(String, nullable=False)
+    segment = Column(String, nullable=False, default="CASH")
+    side = Column(String, nullable=False)  # BUY | SELL
+    order_type = Column(String, nullable=False)
+    product = Column(String, nullable=False)
+    requested_quantity = Column(Integer, nullable=False)
+    filled_quantity = Column(Integer, nullable=False, default=0)
+    remaining_quantity = Column(Integer, nullable=False)
+    requested_price = Column(Float, nullable=True)
+    average_fill_price = Column(Float, nullable=True)
+    status = Column(String, nullable=False, default="CREATED", index=True)
+    error_category = Column(String, nullable=True)
+    error_message = Column(Text, nullable=True)
+    mode = Column(String, nullable=False, default="paper")  # paper | live
+    # JSON blob: confluence_status/score/reasons that authorized this order,
+    # for audit purposes -- never contains credentials.
+    setup_reference = Column(Text, nullable=True)
+    position_id = Column(String, nullable=True, index=True)
+    created_at = Column(String, default=lambda: utcnow().isoformat())
+    submitted_at = Column(String, nullable=True)
+    last_checked_at = Column(String, nullable=True)
+    terminal_at = Column(String, nullable=True)
     updated_at = Column(String, default=lambda: utcnow().isoformat(), onupdate=lambda: utcnow().isoformat())
 
 

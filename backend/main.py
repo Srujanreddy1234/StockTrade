@@ -989,18 +989,35 @@ def groww_orders():
 class GrowwOrderRequest(BaseModel):
     trading_symbol: str
     exchange: str = "NSE"
-    segment: str = "EQ"
+    segment: str = "CASH"
     product: str = "CNC"
     order_type: str = "LIMIT"
     transaction_type: str = "BUY"
+    validity: str = "DAY"
     quantity: int
     price: Optional[float] = None
     trigger_price: Optional[float] = None
+    order_reference_id: Optional[str] = None
 
 
 @app.post("/groww/orders")
 def groww_place_order(payload: GrowwOrderRequest):
-    """Place an order via Groww. Only works if GROWW_ALLOW_REAL_ORDERS=true."""
+    """Place an order via Groww directly. Only works if GROWW_ALLOW_REAL_ORDERS=true.
+
+    SAFETY NOTE (documented per the real-money execution audit): this is a
+    manual trading endpoint, intentionally separate from the autonomous
+    loop. It does NOT pass through the setup/confluence engine, the risk
+    manager (position sizing, daily loss limit, max positions, cooldown),
+    or the order-state/fill-verification machinery in
+    backend/orders/order_manager.py that the autonomous trader uses. It is
+    gated only by GROWW_ALLOW_REAL_ORDERS and has no request-level
+    authentication of its own. Once real orders are ever enabled, ANY
+    caller able to reach this API can place an arbitrary live order. This
+    is acceptable for a trusted single-operator manual-trading use case but
+    is NOT safe to expose on a shared or public network without adding
+    request authentication -- that is intentionally left as a decision for
+    whoever deploys this, not solved here by removing the endpoint.
+    """
     if not is_real_trading_enabled():
         raise HTTPException(status_code=403, detail="Real trading is disabled. Set GROWW_ALLOW_REAL_ORDERS=true to enable.")
     client = get_client()
@@ -1085,6 +1102,41 @@ def autonomous_events(limit: int = Query(100), ticker: Optional[str] = Query(Non
         return {"events": AutonomousEventRepository(db).list_recent(limit=limit, ticker=ticker)}
     finally:
         db.close()
+
+
+@app.get("/autonomous/orders")
+def autonomous_orders(limit: int = Query(50), ticker: Optional[str] = Query(None)):
+    """Return recent broker orders and their full lifecycle state (see
+    backend/orders/order_manager.py) -- CREATED/SUBMITTED/PENDING/
+    PARTIALLY_FILLED/FILLED/REJECTED/CANCELLED/FAILED/UNKNOWN -- as tracked
+    locally. This reads StockTrade's own order table, not Groww directly;
+    use GET /groww/orders for the raw broker order history.
+    """
+    from backend.db.repository import OrderRepository
+
+    db = SessionLocal()
+    try:
+        return {"orders": OrderRepository(db).list_recent(limit=limit, ticker=ticker)}
+    finally:
+        db.close()
+
+
+@app.get("/autonomous/orders/{order_id}")
+def autonomous_order_detail(order_id: str):
+    """Return one locally-tracked order's full lifecycle record by its
+    internal id (as returned in the list above or in autonomous_events'
+    order_id field when no broker_order_id was assigned yet).
+    """
+    from backend.db.repository import OrderRepository
+
+    db = SessionLocal()
+    try:
+        order = OrderRepository(db).get(order_id)
+    finally:
+        db.close()
+    if not order:
+        raise HTTPException(status_code=404, detail=f"No order found with id '{order_id}'.")
+    return order
 
 
 if __name__ == "__main__":

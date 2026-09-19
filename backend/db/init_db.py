@@ -15,6 +15,8 @@ _COLUMN_MIGRATIONS = [
     ("positions", "source", "VARCHAR NOT NULL DEFAULT 'manual'"),
     ("positions", "quantity", "INTEGER"),
     ("positions", "order_id", "VARCHAR"),
+    ("positions", "initial_quantity", "INTEGER"),
+    ("positions", "realized_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
 ]
 
 

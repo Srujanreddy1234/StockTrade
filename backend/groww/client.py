@@ -82,35 +82,48 @@ class GrowwClient:
         except Exception as exc:
             raise GrowwClientError(f"Failed to fetch orders: {exc}") from exc
 
-    def place_order(self, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            api = self._get_api()
-            return api.place_order(**payload)
-        except Exception as exc:
-            raise GrowwClientError(f"Failed to place order: {exc}") from exc
+    def place_order(self, payload: dict[str, Any], timeout: float | None = None) -> dict[str, Any]:
+        """Place an order. `payload` must match the installed growwapi SDK's
+        `place_order()` signature: trading_symbol, exchange, segment, product,
+        order_type, transaction_type, quantity, validity, and optionally
+        price, trigger_price, order_reference_id. `order_reference_id` is the
+        SDK's own broker-side idempotency key (sent through to Groww as-is)
+        -- callers should always pass a deterministic one so a lost-response
+        retry can be reconciled instead of blindly resubmitted.
 
-    def modify_order(self, order_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        try:
-            api = self._get_api()
-            return api.modify_order(order_id=order_id, **payload)
-        except Exception as exc:
-            raise GrowwClientError(f"Failed to modify order: {exc}") from exc
+        Raises the underlying growwapi exception unmodified (GrowwAPIException
+        and its subclasses, or a raw `requests` exception for a genuine
+        network failure) so callers can classify the failure by type instead
+        of parsing a wrapped string.
+        """
+        api = self._get_api()
+        return api.place_order(timeout=timeout, **payload)
 
-    def cancel_order(self, order_id: str) -> dict[str, Any]:
-        try:
-            api = self._get_api()
-            return api.cancel_order(order_id=order_id)
-        except Exception as exc:
-            raise GrowwClientError(f"Failed to cancel order: {exc}") from exc
+    def modify_order(self, order_id: str, segment: str, payload: dict[str, Any]) -> dict[str, Any]:
+        api = self._get_api()
+        return api.modify_order(groww_order_id=order_id, segment=segment, **payload)
 
-    def get_order_status(self, order_id: str) -> dict[str, Any]:
-        try:
-            api = self._get_api()
-            return api.get_status_for_order_id(order_id=order_id)
-        except Exception as exc:
-            raise GrowwClientError(
-                f"Failed to fetch order status: {exc}"
-            ) from exc
+    def cancel_order(self, order_id: str, segment: str = "CASH") -> dict[str, Any]:
+        api = self._get_api()
+        return api.cancel_order(groww_order_id=order_id, segment=segment)
+
+    def get_order_status(self, order_id: str, segment: str = "CASH") -> dict[str, Any]:
+        """Status of an order by the Groww-assigned order id."""
+        api = self._get_api()
+        return api.get_order_status(groww_order_id=order_id, segment=segment)
+
+    def get_order_status_by_reference(self, order_reference_id: str, segment: str = "CASH") -> dict[str, Any]:
+        """Status of an order by OUR order_reference_id -- the only lookup
+        available before a broker_order_id is known, e.g. after a
+        lost-response scenario where place_order() raised before returning
+        one.
+        """
+        api = self._get_api()
+        return api.get_order_status_by_reference(order_reference_id=order_reference_id, segment=segment)
+
+    def get_order_detail(self, order_id: str, segment: str = "CASH") -> dict[str, Any]:
+        api = self._get_api()
+        return api.get_order_detail(groww_order_id=order_id, segment=segment)
 
     def get_ltp(self, trading_symbol: str, exchange: str = "NSE") -> float:
         try:

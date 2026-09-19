@@ -79,6 +79,24 @@ class AutonomousConfig:
     # bounded by the position-sizing cap above.
     order_type: str = os.environ.get("AUTOTRADE_ORDER_TYPE", "MARKET")
     product: str = os.environ.get("AUTOTRADE_PRODUCT", "CNC")
+    order_validity: str = os.environ.get("AUTOTRADE_ORDER_VALIDITY", "DAY")
+    order_segment: str = os.environ.get("AUTOTRADE_ORDER_SEGMENT", "CASH")
+
+    # --- Order lifecycle timeouts (seconds). None of these bound the whole
+    # autonomous loop -- a single ticker's order polling runs in its own
+    # thread (see trader.py), so a stuck broker request delays only that
+    # ticker's next tick, not the others. ---
+    # Max time to wait for place_order() itself to respond.
+    order_submission_timeout_seconds: float = _env_float("ORDER_SUBMISSION_TIMEOUT", 10.0)
+    # Max time to wait for a single get_order_status() call to respond.
+    order_status_timeout_seconds: float = _env_float("ORDER_STATUS_TIMEOUT", 10.0)
+    # Delay between consecutive status polls while an order is non-terminal.
+    order_poll_interval_seconds: float = _env_float("ORDER_POLL_INTERVAL", 2.0)
+    # Total time budget to reach a terminal state before giving up on THIS
+    # poll attempt (the order is left PENDING/UNKNOWN in the DB, not
+    # abandoned -- trader.py's reconciliation pass picks it up on a later
+    # loop iteration).
+    order_confirmation_timeout_seconds: float = _env_float("ORDER_CONFIRMATION_TIMEOUT", 30.0)
 
     # Market hours guard (NSE regular session, IST). Trading outside these
     # hours is refused regardless of signals.
