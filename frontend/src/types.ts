@@ -159,6 +159,7 @@ export interface AlignmentResult {
 
 export interface GrowwStatus {
   connected: boolean;
+  detail: string | null;
   real_trading_enabled: boolean;
 }
 

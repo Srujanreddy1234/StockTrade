@@ -5,6 +5,7 @@ import type {
   AutonomousEventsResponse,
   AutonomousStatus,
   Explanation,
+  GrowwStatus,
   LearnTopic,
   Position,
   PositionsResponse,
@@ -83,7 +84,7 @@ function App() {
   const [openPositionLoading, setOpenPositionLoading] = useState(false);
 
   // Live / Groww state
-  const [growwStatus, setGrowwStatus] = useState<{ connected: boolean; real_trading_enabled: boolean } | null>(null);
+  const [growwStatus, setGrowwStatus] = useState<GrowwStatus | null>(null);
   const [growwHoldings, setGrowwHoldings] = useState<any[] | null>(null);
   const [growwPositions, setGrowwPositions] = useState<any[] | null>(null);
   const [growwMargin, setGrowwMargin] = useState<any | null>(null);
@@ -1014,7 +1015,19 @@ function App() {
           )}
         </div>
 
-        {!connected && (
+        {!connected && growwStatus?.detail && (
+          <div className="live-setup">
+            <h3>Connection failed</h3>
+            <p className="paper-warning">{growwStatus.detail}</p>
+            <p>
+              Credentials are present in the backend <code>.env</code> file, but Groww rejected them. This
+              usually means the API key/secret pair doesn't have trading permissions enabled, has expired, or
+              was regenerated — check this in Groww's own API key settings, not in this app.
+            </p>
+          </div>
+        )}
+
+        {!connected && !growwStatus?.detail && (
           <div className="live-setup">
             <h3>Setup</h3>
             <p>To enable live trading, add your Groww API credentials to the backend <code>.env</code> file:</p>

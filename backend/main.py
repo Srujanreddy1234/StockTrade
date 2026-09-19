@@ -928,6 +928,7 @@ def close_position(position_id: str):
 @app.get("/groww/status")
 def groww_status():
     """Return Groww connection status and whether real trading is enabled."""
+    detail = None
     try:
         client = get_client()
         api = client._get_api()
@@ -938,6 +939,7 @@ def groww_status():
         detail = str(exc)
     return {
         "connected": connected,
+        "detail": detail,
         "real_trading_enabled": is_real_trading_enabled(),
     }
 
