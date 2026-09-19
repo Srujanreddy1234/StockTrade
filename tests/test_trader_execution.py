@@ -71,9 +71,14 @@ def _config(tmp_path, **overrides) -> AutonomousConfig:
 
 def _trader(config: AutonomousConfig, client=None, live_price: float = 100.0) -> AutonomousTrader:
     trader = AutonomousTrader(config)
+    # Tests must be deterministic regardless of the developer's own local
+    # .env -- GROWW_ALLOW_REAL_ORDERS is a real, operator-controlled setting
+    # (not something these tests should ever read), so mode is always
+    # forced explicitly here rather than left to whatever ExecutionEngine
+    # detected from the ambient environment at construction time.
+    trader.execution.mode = "live" if client is not None else "paper"
     if client is not None:
         trader.execution.order_manager.client = client
-        trader.execution.mode = "live"
         trader.execution.order_manager.config = config
         trader.reconciliation.client = client
         # Live mode now runs pre-submission freshness/deviation/margin checks

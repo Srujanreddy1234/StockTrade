@@ -157,7 +157,10 @@ def test_protective_order_not_created_in_paper_mode_even_if_enabled(tmp_path):
     from backend.autonomous.trader import AutonomousTrader
 
     trader = AutonomousTrader(_config(tmp_path, use_protective_orders=True))
-    assert trader.execution.mode == "paper"
+    # Force paper mode explicitly -- this test must not depend on whatever
+    # GROWW_ALLOW_REAL_ORDERS happens to be set to in the developer's own
+    # .env (a real, operator-controlled setting, not a test fixture).
+    trader.execution.mode = "paper"
     client = SmartOrderClient()
     trader.execution.order_manager.client = client
 
