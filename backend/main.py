@@ -620,6 +620,47 @@ def pullback_reversal(
     return {"ticker": ticker, "interval": interval, "events": events[:limit]}
 
 
+@app.get("/volume-vwap/{ticker}")
+def volume_vwap(
+    ticker: str,
+    interval: str = Query("1d"),
+    period: str = Query("2y"),
+    limit: int = Query(50),
+):
+    """Return volume/VWAP intelligence for a ticker: current volume state
+    (SPIKE/EXPANSION/NORMAL/CONTRACTION relative to its 20-period average),
+    volume trend, and VWAP interaction events (reclaim/loss/rejection).
+    Also reports the latest row's snapshot alongside the event history.
+    """
+    from backend.volume.volume_engine import get_volume_vwap_events
+
+    try:
+        df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}"
+        )
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data returned for '{ticker}' ({interval}).")
+
+    df = run_pipeline(df, timeframe=interval)
+    events = get_volume_vwap_events(df, timeframe=interval)
+    events.reverse()
+    last = df.iloc[-1]
+    return {
+        "ticker": ticker,
+        "interval": interval,
+        "snapshot": {
+            "volume_ratio": round(float(last["volume_ratio"]), 2) if not pd.isna(last.get("volume_ratio")) else None,
+            "volume_state": last.get("volume_state"),
+            "volume_trend": last.get("volume_trend"),
+            "price_vs_vwap": last.get("price_vs_vwap"),
+            "vwap_slope": last.get("vwap_slope"),
+        },
+        "events": events[:limit],
+    }
+
+
 @app.get("/alignment/{ticker}")
 def alignment(ticker: str):
     """Return multi-timeframe trend alignment for a ticker."""
