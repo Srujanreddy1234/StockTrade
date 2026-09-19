@@ -9,6 +9,7 @@ import pandas as pd
 
 from backend.data_engine.loader import generate_synthetic, load_from_yfinance
 from backend.candles.candle_engine import add_candle_metrics, detect_patterns
+from backend.candles.pattern_library import add_extended_candle_metrics, detect_extended_patterns
 from backend.indicators.indicator_engine import (
     add_indicators,
     find_swing_points,
@@ -23,6 +24,8 @@ def run_pipeline(df: pd.DataFrame) -> pd.DataFrame:
     """Run the full existing pipeline on a standard OHLCV DataFrame."""
     df = add_candle_metrics(df)
     df = detect_patterns(df)
+    df = add_extended_candle_metrics(df)
+    df = detect_extended_patterns(df)
     df = add_indicators(df)
     df = find_swing_points(df, lookback=5)
     df = add_trend_read(df)

@@ -470,6 +470,37 @@ def learn_topic(topic_id: str):
     return topic
 
 
+@app.get("/patterns/{ticker}")
+def patterns(
+    ticker: str,
+    interval: str = Query("1d"),
+    period: str = Query("2y"),
+    limit: int = Query(50),
+):
+    """Return structured, explainable candlestick pattern events for a
+    ticker -- both the single mutually-exclusive pattern candle_engine picks
+    per row, and every secondary pattern detected by the extended pattern
+    library. Each event carries a quality proxy, its trend/support-resistance
+    context (where available), whether the next candle confirmed it, and a
+    plain invalidation note. Most recent first.
+    """
+    from backend.candles.pattern_library import get_pattern_events
+
+    try:
+        df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}"
+        )
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data returned for '{ticker}' ({interval}).")
+
+    df = run_pipeline(df)
+    events = get_pattern_events(df, timeframe=interval)
+    events.reverse()
+    return {"ticker": ticker, "interval": interval, "events": events[:limit]}
+
+
 @app.get("/alignment/{ticker}")
 def alignment(ticker: str):
     """Return multi-timeframe trend alignment for a ticker."""
