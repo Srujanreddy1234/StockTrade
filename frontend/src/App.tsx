@@ -92,9 +92,11 @@ function App() {
   const [growwLoading, setGrowwLoading] = useState(false);
   const [growwError, setGrowwError] = useState<string | null>(null);
   const [orderForm, setOrderForm] = useState({
-    trading_symbol: 'RELIANCE.NS',
+    // Groww's own symbol/segment convention -- no yfinance-style ".NS"
+    // suffix, and "CASH" (not "EQ") is the documented equity segment value.
+    trading_symbol: 'RELIANCE',
     exchange: 'NSE',
-    segment: 'EQ',
+    segment: 'CASH',
     product: 'CNC',
     order_type: 'LIMIT',
     transaction_type: 'BUY',
