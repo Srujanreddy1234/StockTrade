@@ -18,6 +18,7 @@ from backend.indicators.indicator_engine import (
 )
 from backend.signals.scoring_engine import add_scores
 from backend.risk.risk_engine import add_risk_levels
+from backend.market_structure.structure_engine import add_structure_events
 
 
 def run_pipeline(df: pd.DataFrame) -> pd.DataFrame:
@@ -30,6 +31,7 @@ def run_pipeline(df: pd.DataFrame) -> pd.DataFrame:
     df = find_swing_points(df, lookback=5)
     df = add_trend_read(df)
     df = add_support_resistance(df)
+    df = add_structure_events(df)
     df = add_scores(df)
     df = add_risk_levels(df)
     return df

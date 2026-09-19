@@ -501,6 +501,36 @@ def patterns(
     return {"ticker": ticker, "interval": interval, "events": events[:limit]}
 
 
+@app.get("/structure/{ticker}")
+def structure(
+    ticker: str,
+    interval: str = Query("1d"),
+    period: str = Query("2y"),
+    limit: int = Query(50),
+):
+    """Return explicit market-structure events (Break of Structure / Change
+    of Character / range breakout) for a ticker -- the moments price
+    actually crossed a structural support/resistance level, and what that
+    meant for the prevailing trend. Most recent first.
+    """
+    from backend.market_structure.structure_engine import get_structure_events
+
+    try:
+        df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}"
+        )
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data returned for '{ticker}' ({interval}).")
+
+    df = run_pipeline(df)
+    events = get_structure_events(df, timeframe=interval)
+    events.reverse()
+    current_state = df["structure_state"].iloc[-1] if "structure_state" in df.columns else None
+    return {"ticker": ticker, "interval": interval, "current_state": current_state, "events": events[:limit]}
+
+
 @app.get("/alignment/{ticker}")
 def alignment(ticker: str):
     """Return multi-timeframe trend alignment for a ticker."""
