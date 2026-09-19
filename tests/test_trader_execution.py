@@ -10,6 +10,7 @@ network call is ever made.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -68,12 +69,21 @@ def _config(tmp_path, **overrides) -> AutonomousConfig:
     return AutonomousConfig(**defaults)
 
 
-def _trader(config: AutonomousConfig, client=None) -> AutonomousTrader:
+def _trader(config: AutonomousConfig, client=None, live_price: float = 100.0) -> AutonomousTrader:
     trader = AutonomousTrader(config)
     if client is not None:
         trader.execution.order_manager.client = client
         trader.execution.mode = "live"
         trader.execution.order_manager.config = config
+        trader.reconciliation.client = client
+        # Live mode now runs pre-submission freshness/deviation/margin checks
+        # (_pre_live_submission_checks) that normally rely on _tick_one
+        # having populated _last_price_meta and on a real LTP fetch; these
+        # tests call _maybe_enter/_maybe_exit directly, so fake both here
+        # rather than hitting the network for a non-existent test symbol.
+        for ticker in config.watchlist:
+            trader._last_price_meta[ticker] = (time.time(), "groww_ltp")
+        trader._fetch_ltp_sync = lambda t: (live_price, "groww_ltp")
     return trader
 
 
@@ -216,7 +226,7 @@ def test_reconciliation_finalizes_position_after_pending_order_fills(tmp_path):
 
     # Now the broker confirms the fill on a later reconciliation pass.
     client.status_by_id["GRW2"] = [
-        {"order_status": "FILLED", "filled_quantity": 5, "average_fill_price": 101.0}
+        {"order_status": "EXECUTED", "filled_quantity": 5, "remaining_quantity": 0, "average_fill_price": 101.0}
     ]
     advanced = trader.execution.reconcile_pending_orders()
     for order in advanced:
@@ -225,3 +235,100 @@ def test_reconciliation_finalizes_position_after_pending_order_fills(tmp_path):
     positions = position_store.list_all()
     assert len(positions) == 1
     assert positions[0]["entry_price"] == 101.0  # broker-confirmed price, not the 100.0 signal price
+
+
+# --- Reconciliation mismatch blocks new entries on that ticker ---
+
+def test_critical_reconciliation_mismatch_blocks_new_entry(tmp_path):
+    client = FakeGrowwClient()
+    trader = _trader(_config(tmp_path), client=client)
+    trader._critical_mismatch_tickers = {"TESTCO"}
+
+    snapshot = _bullish_snapshot(status="ENTRY")
+    asyncio.run(trader._maybe_enter("TESTCO", 100.0, _ready_signal(), snapshot, available_margin=100000.0))
+
+    db = SessionLocal()
+    assert db.query(OrderDB).count() == 0
+    db.close()
+    assert position_store.count_open() == 0
+
+
+# --- Stale market data blocks a live entry ---
+
+def test_stale_market_data_blocks_live_entry(tmp_path):
+    client = FakeGrowwClient()
+    client.place_order_queue = [{"groww_order_id": "GRW8", "order_status": "PENDING"}]
+    trader = _trader(_config(tmp_path, max_market_data_age_seconds=5.0), client=client)
+    # Simulate a quote observed well outside the freshness window.
+    trader._last_price_meta["TESTCO"] = (time.time() - 60.0, "groww_ltp")
+
+    snapshot = _bullish_snapshot(status="ENTRY")
+    asyncio.run(trader._maybe_enter("TESTCO", 100.0, _ready_signal(), snapshot, available_margin=100000.0))
+
+    db = SessionLocal()
+    assert db.query(OrderDB).count() == 0
+    db.close()
+
+
+def test_yfinance_fallback_source_blocks_live_entry(tmp_path):
+    client = FakeGrowwClient()
+    trader = _trader(_config(tmp_path), client=client)
+    # The last observed quote came from the delayed fallback, not a live
+    # broker quote -- must never be trusted for a real order.
+    trader._last_price_meta["TESTCO"] = (time.time(), "yfinance_fallback")
+
+    snapshot = _bullish_snapshot(status="ENTRY")
+    asyncio.run(trader._maybe_enter("TESTCO", 100.0, _ready_signal(), snapshot, available_margin=100000.0))
+
+    db = SessionLocal()
+    assert db.query(OrderDB).count() == 0
+    db.close()
+
+
+# --- Price deviation blocks a live entry ---
+
+def test_price_deviation_beyond_tolerance_blocks_live_entry(tmp_path):
+    client = FakeGrowwClient()
+    trader = _trader(
+        _config(tmp_path, max_entry_price_deviation_pct=0.5), client=client, live_price=103.0,
+    )  # price moved 3% since the signal was evaluated
+
+    snapshot = _bullish_snapshot(status="ENTRY")
+    asyncio.run(trader._maybe_enter("TESTCO", 100.0, _ready_signal(), snapshot, available_margin=100000.0))
+
+    db = SessionLocal()
+    assert db.query(OrderDB).count() == 0
+    db.close()
+
+
+def test_price_within_deviation_tolerance_allows_live_entry(tmp_path):
+    client = FakeGrowwClient()
+    client.place_order_queue = [{"groww_order_id": "GRW9", "order_status": "PENDING"}]
+    trader = _trader(
+        _config(tmp_path, max_entry_price_deviation_pct=1.0), client=client, live_price=100.2,
+    )  # 0.2% move, within tolerance
+
+    snapshot = _bullish_snapshot(status="ENTRY")
+    asyncio.run(trader._maybe_enter("TESTCO", 100.0, _ready_signal(), snapshot, available_margin=100000.0))
+
+    db = SessionLocal()
+    assert db.query(OrderDB).count() == 1
+    db.close()
+
+
+# --- Insufficient margin on re-check blocks a live entry ---
+
+def test_insufficient_margin_on_recheck_blocks_live_entry(tmp_path):
+    class LowMarginClient(FakeGrowwClient):
+        def get_margin(self):
+            return {"available_margin": 1.0}  # not enough for even 1 share
+
+    client = LowMarginClient()
+    trader = _trader(_config(tmp_path), client=client)
+
+    snapshot = _bullish_snapshot(status="ENTRY")
+    asyncio.run(trader._maybe_enter("TESTCO", 100.0, _ready_signal(), snapshot, available_margin=100000.0))
+
+    db = SessionLocal()
+    assert db.query(OrderDB).count() == 0
+    db.close()

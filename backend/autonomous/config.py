@@ -98,6 +98,23 @@ class AutonomousConfig:
     # loop iteration).
     order_confirmation_timeout_seconds: float = _env_float("ORDER_CONFIRMATION_TIMEOUT", 30.0)
 
+    # --- Broker reconciliation (live mode only -- paper positions have no
+    # broker counterpart to compare against) ---
+    reconciliation_interval_seconds: float = _env_float("AUTONOMOUS_RECONCILIATION_INTERVAL_SECONDS", 60.0)
+    reconciliation_price_tolerance_pct: float = _env_float("RECONCILIATION_PRICE_TOLERANCE_PCT", 1.0)
+
+    # --- Stale market-data protection ---
+    max_market_data_age_seconds: float = _env_float("MAX_MARKET_DATA_AGE_SECONDS", 15.0)
+
+    # --- Price-deviation protection between signal and order submission ---
+    max_entry_price_deviation_pct: float = _env_float("MAX_ENTRY_PRICE_DEVIATION_PCT", 0.5)
+
+    # --- Broker-side protective orders (OCO: target + stop-loss). Off by
+    # default -- see backend/orders/protective_orders.py docstring for why
+    # this defaults to False even though Groww's documented OCO API
+    # supports NSE CASH/CNC, which is what this bot trades. ---
+    use_protective_orders: bool = os.environ.get("AUTOTRADE_USE_PROTECTIVE_ORDERS", "false").strip().lower() in ("1", "true", "yes")
+
     # Market hours guard (NSE regular session, IST). Trading outside these
     # hours is refused regardless of signals.
     market_open: str = os.environ.get("AUTOTRADE_MARKET_OPEN", "09:15")

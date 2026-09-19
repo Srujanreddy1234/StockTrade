@@ -1013,13 +1013,28 @@ def groww_place_order(payload: GrowwOrderRequest):
     gated only by GROWW_ALLOW_REAL_ORDERS and has no request-level
     authentication of its own. Once real orders are ever enabled, ANY
     caller able to reach this API can place an arbitrary live order. This
-    is acceptable for a trusted single-operator manual-trading use case but
-    is NOT safe to expose on a shared or public network without adding
-    request authentication -- that is intentionally left as a decision for
-    whoever deploys this, not solved here by removing the endpoint.
+    SECURITY: the project already has a global API-key gate (AuthMiddleware,
+    above, keyed on BACKEND_API_KEY) that covers every route except /health
+    and the docs endpoints. Following up on the earlier audit finding that
+    this endpoint had no protection of its own: it does not need separate
+    protection, it needs BACKEND_API_KEY to actually be SET -- currently
+    the .env ships it empty, which makes AuthMiddleware a no-op. Rather
+    than silently allowing a real-money order endpoint to run unauthenticated,
+    this handler hard-refuses to place a real order at all unless
+    BACKEND_API_KEY is configured, regardless of GROWW_ALLOW_REAL_ORDERS.
     """
     if not is_real_trading_enabled():
         raise HTTPException(status_code=403, detail="Real trading is disabled. Set GROWW_ALLOW_REAL_ORDERS=true to enable.")
+    if not _BACKEND_API_KEY:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Real trading is enabled but BACKEND_API_KEY is not configured, so this "
+                "real-money order endpoint would be reachable by anyone who can reach the "
+                "API. Set BACKEND_API_KEY (and the matching X-API-Key header on requests) "
+                "before this endpoint will place a real order."
+            ),
+        )
     client = get_client()
     try:
         result = client.place_order(payload.dict())

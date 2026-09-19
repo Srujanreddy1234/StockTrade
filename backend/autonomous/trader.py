@@ -45,8 +45,10 @@ from backend.db.repository import AutonomousEventRepository, OrderRepository
 from backend.groww.auth import GrowwAuthError
 from backend.groww.client import GrowwClientError, get_client
 from backend.orders.order_manager import CANCELLED, FAILED, FILLED, PARTIALLY_FILLED, REJECTED
+from backend.orders.protective_orders import create_protective_oco
 from backend.pipeline import run_pipeline
 from backend.positions.position_store import position_store
+from backend.reconciliation.reconciliation_service import ReconciliationService
 
 _ORDER_TERMINAL_STATES = (FILLED, PARTIALLY_FILLED, REJECTED, CANCELLED, FAILED)
 
@@ -93,6 +95,12 @@ class AutonomousTrader:
             t: PipelineSnapshot() for t in self.config.watchlist
         }
         self._last_observed_at: dict[str, float] = {t: 0.0 for t in self.config.watchlist}
+        self._last_price_meta: dict[str, tuple[float, str]] = {}
+        self.reconciliation = ReconciliationService(
+            get_client(), price_tolerance_pct=self.config.reconciliation_price_tolerance_pct
+        )
+        self._last_reconciliation_at = 0.0
+        self._critical_mismatch_tickers: set[str] = set()
         self._stop = asyncio.Event()
         logger.info(
             "Autonomous trader initialized in %s mode, watchlist=%s",
@@ -103,10 +111,17 @@ class AutonomousTrader:
     def stop(self) -> None:
         self._stop.set()
 
-    def _fetch_ltp_sync(self, ticker: str) -> float | None:
+    def _fetch_ltp_sync(self, ticker: str) -> tuple[float, str] | None:
+        """Returns (price, source) where source is "groww_ltp" (true live
+        broker quote) or "yfinance_fallback" (best-effort, can be minute-
+        delayed) -- the distinction matters for stale-data protection below,
+        which refuses to let a LIVE order rely on the delayed fallback.
+        """
         try:
             client = get_client()
-            return client.get_ltp(ticker, exchange=self.config.exchange)
+            price = client.get_ltp(ticker, exchange=self.config.exchange)
+            if price and price > 0:
+                return float(price), "groww_ltp"
         except (GrowwAuthError, GrowwClientError):
             pass
         except Exception:
@@ -119,10 +134,73 @@ class AutonomousTrader:
                 interval="1m",
             )
             if not df.empty:
-                return float(df["close"].iloc[-1])
+                return float(df["close"].iloc[-1]), "yfinance_fallback"
         except Exception:
             logger.exception("Fallback yfinance LTP fetch failed for %s", ticker)
         return None
+
+    def _market_data_fresh_for_live_order(self, ticker: str) -> tuple[bool, str]:
+        """Only enforced for LIVE order submission (see _maybe_enter/_maybe_exit).
+        Paper mode intentionally tolerates the yfinance fallback -- it's a
+        simulation, not a real order.
+        """
+        meta = self._last_price_meta.get(ticker)
+        if meta is None:
+            return False, "no market data observed yet for this ticker"
+        observed_at, source = meta
+        age = time.time() - observed_at
+        if source != "groww_ltp":
+            return False, f"latest price came from {source}, not a live broker quote"
+        if age > self.config.max_market_data_age_seconds:
+            return False, f"latest live quote is {age:.1f}s old (max {self.config.max_market_data_age_seconds}s)"
+        return True, "fresh"
+
+    def _pre_live_submission_checks(
+        self, ticker: str, signal_price: float, signal_quantity: int
+    ) -> tuple[bool, str | None, float, int]:
+        """Runs immediately before a LIVE order submission only (never in
+        paper mode). Three independent gates, all must pass:
+
+        1. Market data freshness -- refuses a delayed/stale quote.
+        2. Price deviation -- re-fetches the current price and aborts if it
+           has moved beyond tolerance since the signal was evaluated
+           (protects against a fast-moving stock gapping past the level the
+           setup/risk engines validated).
+        3. Margin re-validation -- refreshes available margin (the loop-level
+           value can be up to tick_interval_seconds stale) and re-sizes the
+           position against it rather than trusting the earlier snapshot.
+
+        Returns (ok, reason_if_blocked, verified_price, verified_quantity).
+        """
+        fresh, reason = self._market_data_fresh_for_live_order(ticker)
+        if not fresh:
+            return False, f"stale market data ({reason})", signal_price, signal_quantity
+
+        fetched = self._fetch_ltp_sync(ticker)
+        if fetched is None:
+            return False, "could not verify current price immediately before submission", signal_price, signal_quantity
+        current_price, current_source = fetched
+        if current_source != "groww_ltp":
+            return False, "verification quote came from the delayed fallback, not a live broker quote", signal_price, signal_quantity
+
+        deviation_pct = abs(current_price - signal_price) / signal_price * 100 if signal_price else 0.0
+        if deviation_pct > self.config.max_entry_price_deviation_pct:
+            return (
+                False,
+                f"price moved {deviation_pct:.2f}% since signal (max {self.config.max_entry_price_deviation_pct}%)",
+                current_price, signal_quantity,
+            )
+
+        try:
+            fresh_margin = self.execution.get_available_margin()
+        except Exception as exc:
+            return False, f"could not refresh margin before submission: {exc}", current_price, signal_quantity
+
+        verified_quantity = self.risk.size_position(fresh_margin, current_price)
+        if verified_quantity <= 0:
+            return False, "insufficient margin on re-check immediately before submission", current_price, 0
+
+        return True, None, current_price, min(signal_quantity, verified_quantity)
 
     def _refresh_pipeline_sync(self, ticker: str) -> PipelineSnapshot:
         try:
@@ -158,9 +236,13 @@ class AutonomousTrader:
             return self.pipeline_cache[ticker]
 
     async def _tick_one(self, ticker: str, available_margin: float) -> None:
-        price = await asyncio.to_thread(self._fetch_ltp_sync, ticker)
+        fetched = await asyncio.to_thread(self._fetch_ltp_sync, ticker)
+        if fetched is None:
+            return
+        price, price_source = fetched
         if price is None or price <= 0:
             return
+        self._last_price_meta[ticker] = (time.time(), price_source)
 
         state = self.tick_states[ticker]
         state.push(price)
@@ -221,6 +303,20 @@ class AutonomousTrader:
         if self.execution.has_in_flight_order(ticker, "BUY"):
             return
 
+        # A critical local-vs-broker mismatch on this ticker (local position
+        # the broker doesn't show, a broker position we don't track, or a
+        # quantity disagreement) means StockTrade's view of what it already
+        # holds here cannot be trusted -- refuse a NEW entry until a human
+        # reviews it. Existing positions are still monitored for exits
+        # regardless (see _tick_one), so this never stops a real position
+        # from being managed, only from being added to.
+        if ticker in self._critical_mismatch_tickers:
+            log_event(
+                ticker=ticker, event_type="skip", price=price, mode=self.execution.mode,
+                reason="blocked: unresolved broker reconciliation mismatch on this ticker",
+            )
+            return
+
         open_count = position_store.count_open(source="autonomous")
         can_open, reason = self.risk.can_open_new_position(ticker, open_count)
         if not can_open:
@@ -238,6 +334,17 @@ class AutonomousTrader:
         quantity = self.risk.size_position(available_margin, price)
         if quantity <= 0:
             return
+
+        if self.execution.mode == "live":
+            ok, reason, price, quantity = await asyncio.to_thread(
+                self._pre_live_submission_checks, ticker, price, quantity
+            )
+            if not ok:
+                log_event(
+                    ticker=ticker, event_type="skip", price=price, mode=self.execution.mode,
+                    reason=f"blocked before live submission: {reason}",
+                )
+                return
 
         # decision_id ties this specific structural setup (identified by
         # which pipeline refresh produced it) to its order, so a retried
@@ -390,6 +497,9 @@ class AutonomousTrader:
                 reason=f"order {status}; confluence_score={setup_reference.get('confluence_score')}",
             )
             logger.info("BUY %s x%s @ %.2f (order %s)", ticker, order["filled_quantity"], fill_price, status)
+
+            if self.config.use_protective_orders and order["mode"] == "live":
+                self._create_protective_order(order, position, setup_reference)
             return
 
         # SELL
@@ -420,7 +530,70 @@ class AutonomousTrader:
             ticker, order["filled_quantity"], status, updated["status"], pnl_delta,
         )
 
+    def _run_reconciliation(self, source: str) -> None:
+        """Compare local vs broker position state and update the ticker
+        block-list. Only meaningful in live mode -- paper positions have no
+        real broker counterpart, so this would just report every open paper
+        position as LOCAL_ONLY noise.
+        """
+        if self.execution.mode != "live":
+            return
+        try:
+            results = self.reconciliation.run(source)
+            self._critical_mismatch_tickers = self.reconciliation.critical_tickers(results)
+            if self.reconciliation.has_critical_mismatch(results):
+                logger.warning(
+                    "Reconciliation (%s) found a critical mismatch: %s",
+                    source, [r.detail for r in results if r.classification != "MATCHED"],
+                )
+        except Exception:
+            logger.exception("Reconciliation pass failed (%s)", source)
+
+    def _create_protective_order(self, order: dict, position: dict, setup_reference: dict) -> None:
+        """Best-effort, opt-in (AUTOTRADE_USE_PROTECTIVE_ORDERS) broker-side
+        OCO covering the ACTUAL filled quantity of a just-confirmed entry.
+        Failure here never undoes the entry or the position -- the position
+        simply falls back to client-side-only monitoring, exactly as before
+        this feature existed, and the failure is audited so a human can
+        create protection manually if desired.
+        """
+        target1 = setup_reference.get("target1")
+        invalidation = setup_reference.get("invalidation")
+        if target1 is None or invalidation is None:
+            return
+        try:
+            result = create_protective_oco(
+                self.execution.order_manager.client,
+                ticker=order["ticker"],
+                exchange=order["exchange"],
+                segment=order["segment"],
+                product=order["product"],
+                quantity=order["filled_quantity"],
+                target_price=float(target1),
+                stop_price=float(invalidation),
+                exit_transaction_type="SELL",
+                reference_id=order.get("order_reference_id"),
+            )
+            smart_order_id = result.get("smart_order_id") or result.get("id")
+            log_event(
+                ticker=order["ticker"], event_type="protective_order_created", mode=order["mode"],
+                order_id=smart_order_id, quantity=order["filled_quantity"],
+                reason=f"OCO target={target1} stop={invalidation} for position {position['id']}",
+            )
+        except Exception as exc:
+            logger.exception("Failed to create protective OCO for %s", order["ticker"])
+            log_event(
+                ticker=order["ticker"], event_type="protective_order_failed", mode=order["mode"],
+                reason=f"position {position['id']} remains on client-side-only monitoring: {exc}",
+            )
+
     async def run_forever(self) -> None:
+        # Startup reconciliation: before anything else, find out whether
+        # what StockTrade thinks it holds actually matches Groww. A stale
+        # local DB must not be trusted as-is for a fresh process start.
+        await asyncio.to_thread(self._run_reconciliation, "startup")
+        self._last_reconciliation_at = time.time()
+
         while not self._stop.is_set():
             if not is_market_open(self.config):
                 await asyncio.sleep(30)
@@ -433,6 +606,10 @@ class AutonomousTrader:
                 logger.warning("Kill switch active: %s", self.risk.state.kill_switch_reason)
                 await asyncio.sleep(self.config.tick_interval_seconds)
                 continue
+
+            if time.time() - self._last_reconciliation_at > self.config.reconciliation_interval_seconds:
+                await asyncio.to_thread(self._run_reconciliation, "periodic")
+                self._last_reconciliation_at = time.time()
 
             # Advance any order left non-terminal by a previous iteration
             # (bounded poll timeout, or a lost response marked UNKNOWN) --

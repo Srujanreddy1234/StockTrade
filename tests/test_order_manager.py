@@ -84,6 +84,12 @@ class FakeGrowwClient:
             raise item
         return item
 
+    def get_margin(self):
+        return {"available_margin": 1_000_000.0, "available_cash": 1_000_000.0}
+
+    def get_positions(self):
+        return []
+
 
 @pytest.fixture(autouse=True)
 def _clean_db():
@@ -164,7 +170,7 @@ def test_live_order_submit_then_poll_to_filled():
     client.place_order_queue = [{"groww_order_id": "GRW1", "order_status": "PENDING"}]
     client.status_by_id["GRW1"] = [
         {"order_status": "PENDING"},
-        {"order_status": "FILLED", "filled_quantity": 15, "average_fill_price": 987.5},
+        {"order_status": "EXECUTED", "filled_quantity": 15, "remaining_quantity": 0, "average_fill_price": 987.5},
     ]
     mgr = _manager(client)
     order = mgr.create_order(
@@ -189,7 +195,7 @@ def test_partial_fill_then_final_fill():
     client = FakeGrowwClient()
     client.place_order_queue = [{"groww_order_id": "GRW2", "order_status": "PENDING"}]
     client.status_by_id["GRW2"] = [
-        {"order_status": "PARTIALLY_FILLED", "filled_quantity": 40, "remaining_quantity": 60, "average_fill_price": 100.0},
+        {"order_status": "EXECUTED", "filled_quantity": 40, "remaining_quantity": 60, "average_fill_price": 100.0},
     ]
     mgr = _manager(client)
     order = mgr.create_order(
@@ -203,7 +209,7 @@ def test_partial_fill_then_final_fill():
     assert order["remaining_quantity"] == 60
 
     client.status_by_id["GRW2"] = [
-        {"order_status": "FILLED", "filled_quantity": 100, "remaining_quantity": 0, "average_fill_price": 100.5},
+        {"order_status": "EXECUTED", "filled_quantity": 100, "remaining_quantity": 0, "average_fill_price": 100.5},
     ]
     final = mgr.reconcile(order)
     assert final["status"] == FILLED
@@ -284,7 +290,7 @@ def test_lost_response_but_broker_actually_filled_is_recovered_via_reference():
     ref_id = order["order_reference_id"]
     # The broker actually accepted and filled it; only OUR response was lost.
     client.status_by_reference[ref_id] = [
-        {"groww_order_id": "GRW4", "order_status": "FILLED", "filled_quantity": 10, "average_fill_price": 2500.0}
+        {"groww_order_id": "GRW4", "order_status": "EXECUTED", "filled_quantity": 10, "remaining_quantity": 0, "average_fill_price": 2500.0}
     ]
     result = mgr.submit(order, reference_price=2490.0)
     assert result["status"] == FILLED
@@ -365,7 +371,7 @@ def test_pending_order_recoverable_from_db_after_restart():
     assert recovered["broker_order_id"] == "GRW6"
 
     mgr2 = _manager(client)
-    client.status_by_id["GRW6"] = [{"order_status": "FILLED", "filled_quantity": 10, "average_fill_price": 1201.0}]
+    client.status_by_id["GRW6"] = [{"order_status": "EXECUTED", "filled_quantity": 10, "remaining_quantity": 0, "average_fill_price": 1201.0}]
     final = mgr2.reconcile(recovered)
     assert final["status"] == FILLED
 
@@ -386,7 +392,7 @@ def test_reconcile_all_pending_advances_unknown_orders():
     assert result["status"] == UNKNOWN
 
     client.status_by_reference[ref_id] = [
-        {"groww_order_id": "GRW7", "order_status": "FILLED", "filled_quantity": 5, "average_fill_price": 7010.0}
+        {"groww_order_id": "GRW7", "order_status": "EXECUTED", "filled_quantity": 5, "remaining_quantity": 0, "average_fill_price": 7010.0}
     ]
     advanced = mgr.reconcile_all_pending()
     assert any(o["status"] == FILLED and o["ticker"] == "BAJFINANCE" for o in advanced)
@@ -422,3 +428,144 @@ def test_position_reduce_quantity_partial_then_full_close():
     assert after_full["quantity"] == 0
     # 40*(110-100) + 60*(115-100) = 400 + 900 = 1300 on a 100*100=10000 cost basis -> 13%
     assert after_full["return_pct"] == pytest.approx(13.0)
+
+
+# --- Broker response normalization against Groww's DOCUMENTED status enum ---
+# (groww.in/trade-api/docs/python-sdk/annexures: NEW, ACKED, TRIGGER_PENDING,
+# APPROVED, REJECTED, FAILED, EXECUTED, DELIVERY_AWAITED, CANCELLED,
+# CANCELLATION_REQUESTED, MODIFICATION_REQUESTED, COMPLETED)
+
+from backend.orders.order_manager import resolve_status
+
+
+@pytest.mark.parametrize(
+    "order_status,expected",
+    [
+        ("NEW", PENDING),
+        ("ACKED", PENDING),
+        ("TRIGGER_PENDING", PENDING),
+        ("APPROVED", PENDING),
+        ("MODIFICATION_REQUESTED", PENDING),
+        ("REJECTED", REJECTED),
+        ("FAILED", REJECTED),
+        ("CANCELLED", CANCELLED),
+        ("CANCELLATION_REQUESTED", CANCELLED),
+        ("EXECUTED", FILLED),
+        ("COMPLETED", FILLED),
+        ("DELIVERY_AWAITED", FILLED),
+    ],
+)
+def test_resolve_status_full_documented_enum_no_partial_quantities(order_status, expected):
+    # No filled/remaining_quantity fields present at all -- status string
+    # alone must resolve exactly as documented.
+    raw = {"order_status": order_status}
+    assert resolve_status(raw, requested_quantity=10) == expected
+
+
+def test_resolve_status_executed_but_quantities_show_partial_is_not_upgraded_to_filled():
+    # A broker "done" status must never be trusted over the documented
+    # filled_quantity/remaining_quantity fields for the full-vs-partial call.
+    raw = {"order_status": "EXECUTED", "filled_quantity": 40, "remaining_quantity": 60}
+    assert resolve_status(raw, requested_quantity=100) == PARTIALLY_FILLED
+
+
+def test_resolve_status_executed_with_matching_quantity_is_filled():
+    raw = {"order_status": "EXECUTED", "filled_quantity": 100, "remaining_quantity": 0}
+    assert resolve_status(raw, requested_quantity=100) == FILLED
+
+
+def test_resolve_status_pending_status_but_partial_quantity_already_known():
+    # Some intermediate poll might still say ACKED while a partial execution
+    # has already been recorded against the order -- trust the quantities.
+    raw = {"order_status": "ACKED", "filled_quantity": 25, "remaining_quantity": 75}
+    assert resolve_status(raw, requested_quantity=100) == PARTIALLY_FILLED
+
+
+def test_resolve_status_malformed_response_is_unknown_not_fabricated():
+    assert resolve_status({}, requested_quantity=10) == UNKNOWN
+    assert resolve_status({"some_other_field": "??"}, requested_quantity=10) == UNKNOWN
+
+
+def test_extract_fill_info_uses_documented_field_names_only():
+    from backend.orders.order_manager import _extract_fill_info
+
+    raw = {
+        "groww_order_id": "GRW1",
+        "order_reference_id": "REF1",
+        "order_status": "EXECUTED",
+        "filled_quantity": 40,
+        "remaining_quantity": 60,
+        "average_fill_price": 101.25,
+        "remark": "Partially filled at market close",
+        "deliverable_quantity": 40,
+        "amo_status": "NA",
+    }
+    filled, remaining, avg_price = _extract_fill_info(raw)
+    assert (filled, remaining, avg_price) == (40, 60, 101.25)
+
+
+def test_extract_fill_info_never_fabricates_missing_fields():
+    from backend.orders.order_manager import _extract_fill_info
+
+    filled, remaining, avg_price = _extract_fill_info({"order_status": "NEW"})
+    assert (filled, remaining, avg_price) == (None, None, None)
+
+
+def test_extract_remark_captures_rejection_reason():
+    from backend.orders.order_manager import _extract_remark
+
+    assert _extract_remark({"remark": "Insufficient funds"}) == "Insufficient funds"
+    assert _extract_remark({}) is None
+
+
+def test_full_realistic_rejection_payload_sets_error_message_from_remark():
+    client = FakeGrowwClient()
+    client.place_order_queue = [
+        {"groww_order_id": "GRW9", "order_status": "REJECTED", "remark": "RMS: Exceeds available margin"}
+    ]
+    mgr = _manager(client)
+    order = mgr.create_order(
+        decision_id="ADANIENT:BUY:1", ticker="ADANIENT", exchange="NSE", side="BUY",
+        order_type="MARKET", product="CNC", quantity=10, price=None, mode="live",
+    )
+    result = mgr.submit(order, reference_price=2500.0)
+    assert result["status"] == REJECTED
+    assert result["error_message"] == "RMS: Exceeds available margin"
+
+
+def test_full_realistic_partial_then_complete_lifecycle():
+    """End-to-end using the exact documented field names throughout, as a
+    Groww response would realistically look across an order's lifecycle.
+    """
+    client = FakeGrowwClient()
+    client.place_order_queue = [
+        {"groww_order_id": "GRW10", "order_reference_id": "REF10", "order_status": "ACKED"}
+    ]
+    mgr = _manager(client)
+    order = mgr.create_order(
+        decision_id="TATAMOTORS:BUY:1", ticker="TATAMOTORS", exchange="NSE", side="BUY",
+        order_type="MARKET", product="CNC", quantity=50, price=None, mode="live",
+    )
+    order = mgr.submit(order, reference_price=900.0)
+    assert order["status"] == PENDING
+
+    client.status_by_id["GRW10"] = [
+        {
+            "groww_order_id": "GRW10", "order_status": "EXECUTED",
+            "filled_quantity": 20, "remaining_quantity": 30, "average_fill_price": 901.4,
+        }
+    ]
+    order = mgr.reconcile(order)
+    assert order["status"] == PARTIALLY_FILLED
+    assert order["filled_quantity"] == 20
+
+    client.status_by_id["GRW10"] = [
+        {
+            "groww_order_id": "GRW10", "order_status": "COMPLETED",
+            "filled_quantity": 50, "remaining_quantity": 0, "average_fill_price": 901.9,
+        }
+    ]
+    final = mgr.reconcile(order)
+    assert final["status"] == FILLED
+    assert final["filled_quantity"] == 50
+    assert final["average_fill_price"] == 901.9

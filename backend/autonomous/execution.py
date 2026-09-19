@@ -44,9 +44,14 @@ class ExecutionEngine:
         self.order_manager = OrderManager(get_client(), config)
 
     def get_available_margin(self) -> float:
+        # Uses order_manager.client rather than a fresh get_client() call so
+        # that a test (or any caller) injecting a fake client into
+        # order_manager sees consistent behavior across every broker call
+        # this engine makes -- this is also what makes margin re-validation
+        # immediately before a live submission (trader._pre_live_submission_checks)
+        # actually testable without a real account.
         if self.mode == "live":
-            client = get_client()
-            margin = client.get_margin()
+            margin = self.order_manager.client.get_margin()
             return float(margin.get("available_margin") or margin.get("available_cash") or 0.0)
         # Paper mode: try a real margin read if credentials happen to be
         # configured (useful for sizing against a real account while still

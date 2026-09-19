@@ -8,19 +8,22 @@ failure after the broker already accepted it. This module never creates or
 updates a position until a broker-confirmed fill exists; the trader/exit
 paths call into it instead of GrowwClient.place_order() directly.
 
-IMPORTANT / HONEST LIMITATION: the exact JSON field names Groww's servers
-return in get_order_status()/get_order_status_by_reference()/place_order()
-payloads are NOT documented in the installed growwapi SDK source (the SDK
-only defines the request shape and unwraps the `payload` envelope -- the
-payload's own keys are server-defined). `_normalize_status()` and
-`_extract_fill_info()` below are therefore a best-effort normalization
-layer using multiple plausible key names, verified against the SDK's own
-constants/docstrings where those exist (see growwapi.groww.client) but NOT
-against a real response, since GROWW_ALLOW_REAL_ORDERS is false and no real
-order may be submitted during this development stage. Before this system
-is ever trusted with real money, the exact response schema MUST be
-confirmed against a real (small, manual) order and this mapping adjusted if
-needed -- do not assume it is correct as shipped.
+SCHEMA SOURCE: response field names and the order-status enum below are
+taken from Groww's official documentation (groww.in/trade-api/docs/
+python-sdk/orders and .../annexures, fetched during this development
+stage) plus the installed growwapi SDK's own docstrings/constants -- not
+guessed. Documented response fields: groww_order_id, order_reference_id,
+order_status, filled_quantity, remaining_quantity, average_fill_price,
+remark, deliverable_quantity, amo_status. Documented order_status values:
+NEW, ACKED, TRIGGER_PENDING, APPROVED, REJECTED, FAILED, EXECUTED,
+DELIVERY_AWAITED, CANCELLED, CANCELLATION_REQUESTED,
+MODIFICATION_REQUESTED, COMPLETED. This has NOT been verified against a
+live response body (no real order has been placed), so treat it as
+documentation-grounded rather than empirically confirmed -- if a real
+response ever includes an undocumented field/value, `_normalize_status`
+falls back to UNKNOWN rather than guessing, and that gap should be closed
+by reading one real (small, manual, human-approved) order's response
+before this system is trusted with real money.
 """
 
 from __future__ import annotations
@@ -81,14 +84,20 @@ INVALID_ORDER = "INVALID_ORDER"
 RATE_LIMITED = "RATE_LIMITED"
 UNKNOWN_ERROR = "UNKNOWN_ERROR"
 
-# Broker statuses that map to each internal terminal/non-terminal state.
-# Best-effort (see module docstring) -- these are plausible names based on
-# common broker API conventions, not confirmed against a real Groww response.
-_FILLED_ALIASES = {"FILLED", "EXECUTED", "COMPLETE", "COMPLETED"}
-_PARTIAL_ALIASES = {"PARTIALLY_FILLED", "PARTIAL", "PARTIAL_FILL"}
+# Groww's documented order_status enum (groww.in/trade-api/docs/python-sdk/
+# annexures), mapped to our internal states. EXECUTED/COMPLETED are treated
+# as "the broker considers this done" -- but _normalize_status alone is NOT
+# trusted for the FILLED vs PARTIALLY_FILLED distinction; the caller
+# (submit/reconcile) overrides this using filled_quantity/remaining_quantity
+# whenever both are present, since a broker could in principle report
+# EXECUTED with a remaining_quantity > 0 for a multi-leg fill and the
+# quantity fields are the more trustworthy source for that specific
+# question.
+_FILLED_ALIASES = {"EXECUTED", "COMPLETED", "DELIVERY_AWAITED"}
+_PARTIAL_ALIASES = set()  # Groww does not document a distinct partial-fill status name; inferred from quantities instead (see above).
 _REJECTED_ALIASES = {"REJECTED", "FAILED"}
-_CANCELLED_ALIASES = {"CANCELLED", "CANCELED"}
-_PENDING_ALIASES = {"OPEN", "PENDING", "NEW", "ACKED", "ACK", "TRIGGER_PENDING", "APPROVED", "PLACED"}
+_CANCELLED_ALIASES = {"CANCELLED", "CANCELLATION_REQUESTED"}
+_PENDING_ALIASES = {"NEW", "ACKED", "TRIGGER_PENDING", "APPROVED", "MODIFICATION_REQUESTED"}
 
 
 def classify_exception(exc: Exception) -> str:
@@ -143,8 +152,9 @@ def _normalize_status(raw: dict[str, Any]) -> str:
 
 
 def _extract_fill_info(raw: dict[str, Any]) -> tuple[Optional[int], Optional[int], Optional[float]]:
-    """Return (filled_quantity, remaining_quantity, average_fill_price),
-    each None if genuinely not present in the response -- never fabricated.
+    """Return (filled_quantity, remaining_quantity, average_fill_price)
+    using Groww's documented response field names -- each None if genuinely
+    not present, never fabricated.
     """
 
     def _num(*keys: str) -> Optional[float]:
@@ -157,14 +167,55 @@ def _extract_fill_info(raw: dict[str, Any]) -> tuple[Optional[int], Optional[int
                     continue
         return None
 
-    filled = _num("filled_quantity", "quantity_filled", "executed_quantity", "filled_qty")
-    remaining = _num("remaining_quantity", "pending_quantity", "remaining_qty")
-    avg_price = _num("average_fill_price", "average_price", "avg_price", "trade_price")
+    filled = _num("filled_quantity")
+    remaining = _num("remaining_quantity")
+    avg_price = _num("average_fill_price")
     return (
         int(filled) if filled is not None else None,
         int(remaining) if remaining is not None else None,
         avg_price,
     )
+
+
+def _extract_remark(raw: dict[str, Any]) -> Optional[str]:
+    """Groww's documented `remark` field -- rejection/failure explanation
+    text when present. Never fabricated if absent.
+    """
+    remark = raw.get("remark")
+    return str(remark) if remark else None
+
+
+def resolve_status(raw: dict[str, Any], requested_quantity: int) -> str:
+    """Combine the documented order_status enum with the documented
+    filled_quantity/remaining_quantity fields to make the FILLED vs
+    PARTIALLY_FILLED call, since Groww's status enum does not itself
+    distinguish a partial fill from a complete one (see _PARTIAL_ALIASES).
+
+    A status that maps to FILLED is only trusted as FILLED if the fill
+    quantities agree (filled_quantity == requested_quantity, or both
+    quantity fields are simply absent from this particular response, e.g.
+    a place_order() ack that hasn't executed yet). If the broker reports a
+    "done" status but the numbers show quantity outstanding, the more
+    conservative, quantity-grounded PARTIALLY_FILLED wins -- we never
+    upgrade a partial fill to a full one based on the status string alone.
+    """
+    normalized = _normalize_status(raw)
+    filled_qty, remaining_qty, _ = _extract_fill_info(raw)
+
+    if normalized == FILLED:
+        if filled_qty is not None and filled_qty < requested_quantity:
+            return PARTIALLY_FILLED
+        if remaining_qty is not None and remaining_qty > 0:
+            return PARTIALLY_FILLED
+        return FILLED
+
+    if filled_qty is not None and 0 < filled_qty < requested_quantity:
+        # Quantities show a partial fill even if the status string itself
+        # is one of the pending aliases (e.g. still ACKED while a partial
+        # execution has already happened) -- trust the quantities.
+        return PARTIALLY_FILLED
+
+    return normalized
 
 
 def _order_reference_id(decision_id: str) -> str:
@@ -365,25 +416,26 @@ class OrderManager:
                         },
                     )
 
-            broker_order_id = (
-                response.get("groww_order_id")
-                or response.get("order_id")
-                or response.get("id")
-            )
-            raw_status = response.get("order_status") or response.get("status")
-            normalized = _normalize_status(response) if raw_status else PENDING
+            broker_order_id = response.get("groww_order_id")
+            raw_status = response.get("order_status")
+            resolved = resolve_status(response, order["requested_quantity"]) if raw_status else PENDING
             filled_qty, remaining_qty, avg_price = _extract_fill_info(response)
+            remark = _extract_remark(response)
             changes: dict[str, Any] = {
-                "status": normalized if normalized != UNKNOWN else PENDING,
+                "status": resolved if resolved != UNKNOWN else PENDING,
                 "broker_order_id": broker_order_id,
                 "submitted_at": _now(),
                 "last_checked_at": _now(),
             }
             if filled_qty is not None:
                 changes["filled_quantity"] = filled_qty
-                changes["remaining_quantity"] = max(0, order["requested_quantity"] - filled_qty)
+                changes["remaining_quantity"] = (
+                    remaining_qty if remaining_qty is not None else max(0, order["requested_quantity"] - filled_qty)
+                )
             if avg_price is not None:
                 changes["average_fill_price"] = avg_price
+            if remark and changes["status"] in (REJECTED, FAILED):
+                changes["error_message"] = remark
             if changes["status"] in TERMINAL_STATES:
                 changes["terminal_at"] = _now()
             return repo.update(order["id"], changes)
@@ -456,15 +508,16 @@ class OrderManager:
                     },
                 )
 
-            normalized = _normalize_status(raw)
+            resolved = resolve_status(raw, order["requested_quantity"])
             filled_qty, remaining_qty, avg_price = _extract_fill_info(raw)
-            broker_order_id = raw.get("groww_order_id") or raw.get("order_id") or order.get("broker_order_id")
+            remark = _extract_remark(raw)
+            broker_order_id = raw.get("groww_order_id") or order.get("broker_order_id")
             changes: dict[str, Any] = {
                 "last_checked_at": _now(),
                 "broker_order_id": broker_order_id,
             }
-            if normalized != UNKNOWN:
-                changes["status"] = normalized
+            if resolved != UNKNOWN:
+                changes["status"] = resolved
             if filled_qty is not None:
                 changes["filled_quantity"] = filled_qty
                 changes["remaining_quantity"] = (
@@ -472,6 +525,8 @@ class OrderManager:
                 )
             if avg_price is not None:
                 changes["average_fill_price"] = avg_price
+            if remark and changes.get("status") in (REJECTED, FAILED):
+                changes["error_message"] = remark
             if changes.get("status") in TERMINAL_STATES:
                 changes["terminal_at"] = _now()
             return repo.update(order["id"], changes)
