@@ -558,6 +558,35 @@ def support_resistance(
     return get_support_resistance_snapshot(df, ticker=ticker, timeframe=interval)
 
 
+@app.get("/breakouts/{ticker}")
+def breakouts(
+    ticker: str,
+    interval: str = Query("1d"),
+    period: str = Query("2y"),
+    limit: int = Query(50),
+):
+    """Return breakout/breakdown/retest events for a ticker: whether a zone
+    break was ever confirmed (distance + volume + momentum evidence), or
+    turned out to be a false breakout, and whether a subsequent retest of
+    the broken zone held. Most recent first.
+    """
+    from backend.breakouts.breakout_engine import get_breakout_events
+
+    try:
+        df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}"
+        )
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data returned for '{ticker}' ({interval}).")
+
+    df = run_pipeline(df, timeframe=interval)
+    events = get_breakout_events(df, timeframe=interval)
+    events.reverse()
+    return {"ticker": ticker, "interval": interval, "events": events[:limit]}
+
+
 @app.get("/alignment/{ticker}")
 def alignment(ticker: str):
     """Return multi-timeframe trend alignment for a ticker."""
