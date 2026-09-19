@@ -531,6 +531,33 @@ def structure(
     return {"ticker": ticker, "interval": interval, "current_state": current_state, "events": events[:limit]}
 
 
+@app.get("/support-resistance/{ticker}")
+def support_resistance(
+    ticker: str,
+    interval: str = Query("1d"),
+    period: str = Query("2y"),
+):
+    """Return multi-source support/resistance ZONES for a ticker: clustered
+    swing highs/lows, previous day/week high-low, VWAP (only when genuinely
+    interacted with, not just nearby), and EMA20, with a technical-evidence
+    strength score (0-100 -- NOT a probability of a bounce or a profitable
+    trade), touch count, state, and recent interaction events.
+    """
+    from backend.zones.zone_engine import get_support_resistance_snapshot
+
+    try:
+        df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}"
+        )
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data returned for '{ticker}' ({interval}).")
+
+    df = run_pipeline(df, timeframe=interval)
+    return get_support_resistance_snapshot(df, ticker=ticker, timeframe=interval)
+
+
 @app.get("/alignment/{ticker}")
 def alignment(ticker: str):
     """Return multi-timeframe trend alignment for a ticker."""
