@@ -21,6 +21,7 @@ from backend.risk.risk_engine import add_risk_levels
 from backend.market_structure.structure_engine import add_structure_events
 from backend.zones.zone_engine import add_reference_levels, add_zone_columns
 from backend.breakouts.breakout_engine import add_breakout_events
+from backend.pullback.pullback_engine import add_pullback_reversal_events
 
 
 def run_pipeline(df: pd.DataFrame, timeframe: str = "unknown") -> pd.DataFrame:
@@ -43,6 +44,7 @@ def run_pipeline(df: pd.DataFrame, timeframe: str = "unknown") -> pd.DataFrame:
     df = add_structure_events(df)
     df = add_zone_columns(df, timeframe=timeframe)
     df = add_breakout_events(df, timeframe=timeframe)
+    df = add_pullback_reversal_events(df)
     df = add_scores(df)
     df = add_risk_levels(df)
     return df

@@ -587,6 +587,39 @@ def breakouts(
     return {"ticker": ticker, "interval": interval, "events": events[:limit]}
 
 
+@app.get("/pullback-reversal/{ticker}")
+def pullback_reversal(
+    ticker: str,
+    interval: str = Query("1d"),
+    period: str = Query("2y"),
+    limit: int = Query(50),
+):
+    """Return pullback and reversal events for a ticker. Pullback events
+    distinguish a trend resuming after testing a zone (PULLBACK_CONTINUATION)
+    from one that's getting stretched without yet breaking structure
+    (PULLBACK_EXHAUSTION). Reversal events are always reported as
+    POTENTIAL, never confirmed, with a confidence level based on how much
+    corroborating evidence (candle color, pattern direction, momentum,
+    a recent false breakout) exists alongside the underlying structure
+    change. Most recent first.
+    """
+    from backend.pullback.pullback_engine import get_pullback_reversal_events
+
+    try:
+        df = load_from_yfinance_cached(ticker=ticker, period=period, interval=interval)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Failed to load market data for '{ticker}' ({interval}): {exc}"
+        )
+    if df.empty:
+        raise HTTPException(status_code=400, detail=f"No data returned for '{ticker}' ({interval}).")
+
+    df = run_pipeline(df, timeframe=interval)
+    events = get_pullback_reversal_events(df, timeframe=interval)
+    events.reverse()
+    return {"ticker": ticker, "interval": interval, "events": events[:limit]}
+
+
 @app.get("/alignment/{ticker}")
 def alignment(ticker: str):
     """Return multi-timeframe trend alignment for a ticker."""
