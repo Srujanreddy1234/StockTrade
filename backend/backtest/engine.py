@@ -77,6 +77,7 @@ class Trade:
     target1: float
     invalidation: float
     signal_score: float | None
+    confluence_reasons: list[str] = field(default_factory=list)
     strategy_version: str = STRATEGY_VERSION
 
 
@@ -91,6 +92,7 @@ class _OpenPosition:
     buy_turnover: float
     buy_cost: float
     signal_score: float | None
+    confluence_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -99,6 +101,16 @@ class BacktestResult:
     equity_curve: list[tuple[pd.Timestamp, float]] = field(default_factory=list)
     skipped_tickers: list[str] = field(default_factory=list)
     starting_capital: float = 0.0
+    # Diagnostics-only, not used by the simulation loop above:
+    # every bar meeting the raw structural condition (status/direction/
+    # price-band), independent of portfolio gating (capital/positions/
+    # cooldown/kill-switch) -- lets a diagnostic pass compare the full
+    # signal population against the (smaller) set that became trades.
+    raw_signals: list[dict] = field(default_factory=list)
+    # ticker -> its annotated OHLC+confluence frame, indexed by timestamp,
+    # kept around so a diagnostic pass can compute MFE/MAE without a
+    # second network fetch.
+    ticker_frames: dict[str, pd.DataFrame] = field(default_factory=dict)
 
 
 def _load_and_annotate(ticker: str, config: AutonomousConfig, period: str, interval: str) -> pd.DataFrame | None:
@@ -113,7 +125,7 @@ def _load_and_annotate(ticker: str, config: AutonomousConfig, period: str, inter
         logger.exception("Backtest data/pipeline load failed for %s", ticker)
         return None
     out = df[["open", "high", "low", "close", "confluence_status", "confluence_direction",
-              "confluence_score", "target1", "invalidation"]].copy()
+              "confluence_score", "confluence_reasons", "target1", "invalidation"]].copy()
     out["ticker"] = ticker
     out["timestamp"] = out.index
     return out.reset_index(drop=True)
@@ -145,8 +157,23 @@ def run_backtest(
     if not frames:
         return result
 
+    result.ticker_frames = {
+        f["ticker"].iloc[0]: f.set_index("timestamp")[["open", "high", "low", "close"]]
+        for f in frames
+    }
+
     events = pd.concat(frames, ignore_index=True).sort_values("timestamp", kind="stable")
     events = events.reset_index(drop=True)
+
+    # Diagnostics: the full raw-signal population, independent of
+    # portfolio-level gating (see BacktestResult.raw_signals docstring).
+    raw_mask = (
+        events["confluence_status"].isin(["ENTRY", "WATCH"])
+        & (events["confluence_direction"] == "bullish")
+        & (events["invalidation"] < events["close"])
+        & (events["close"] < events["target1"])
+    )
+    result.raw_signals = events.loc[raw_mask, ["ticker", "timestamp", "confluence_score", "confluence_status"]].to_dict("records")
 
     open_positions: dict[str, _OpenPosition] = {}
     pending_entries: dict[str, dict] = {}  # ticker -> {target1, invalidation, signal_time}
@@ -184,6 +211,7 @@ def run_backtest(
                     ticker=ticker, entry_time=ts, entry_price=fill_price, quantity=quantity,
                     target1=intent["target1"], invalidation=intent["invalidation"],
                     buy_turnover=turnover, buy_cost=buy_cost, signal_score=intent.get("signal_score"),
+                    confluence_reasons=intent.get("confluence_reasons") or [],
                 )
 
         # 2) Manage an existing position: square-off, target, or
@@ -213,7 +241,7 @@ def run_backtest(
                     exit_time=ts, exit_price=exit_price, quantity=position.quantity,
                     exit_reason=reason, gross_pnl=gross_pnl, costs=total_cost, net_pnl=net_pnl,
                     target1=position.target1, invalidation=position.invalidation,
-                    signal_score=position.signal_score,
+                    signal_score=position.signal_score, confluence_reasons=position.confluence_reasons,
                 ))
                 realized_pnl_today += net_pnl
                 equity += net_pnl
@@ -256,6 +284,7 @@ def run_backtest(
                         "target1": row.target1, "invalidation": row.invalidation,
                         "signal_time": ts, "quantity": quantity,
                         "signal_score": row.confluence_score,
+                        "confluence_reasons": row.confluence_reasons,
                     }
 
     return result

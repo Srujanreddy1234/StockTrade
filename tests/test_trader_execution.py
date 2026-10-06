@@ -64,6 +64,13 @@ def _config(tmp_path, **overrides) -> AutonomousConfig:
         cooldown_minutes=0.0,
         buy_probability_threshold=0.5,
         sell_probability_threshold=0.5,
+        # Most tests here aren't testing the intraday cutoff/square-off
+        # behavior itself (test_intraday_risk.py overrides these
+        # explicitly for that) -- without this, these tests become
+        # wall-clock-dependent and start failing for everyone after
+        # 15:00 IST on the day they happen to run.
+        no_new_entries_after="23:59",
+        square_off_time="23:59",
     )
     defaults.update(overrides)
     return AutonomousConfig(**defaults)
