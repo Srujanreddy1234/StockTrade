@@ -159,3 +159,53 @@ def test_compute_metrics_basic_shape(monkeypatch):
     assert metrics["winning_trades"] == 1
     assert metrics["win_rate"] == 1.0
     assert metrics["net_profit"] > 0
+
+
+def test_allowed_statuses_excludes_watch_when_entry_only(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100, status="WATCH"),
+        _bar("2026-01-05 09:25", 101, 102, 100, 101, status="WATCH"),
+        _bar("2026-01-05 09:30", 108, 111, 107, 110, status="WATCH"),
+    ]
+    _patch_single_ticker(monkeypatch, "GGG", bars)
+    config = AutonomousConfig(allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0)
+
+    default_result = run_backtest(config, ["GGG"], period="5d", interval="5m",
+                                   cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE)
+    assert len(default_result.trades) == 1  # default gate accepts WATCH
+
+    entry_only_result = run_backtest(config, ["GGG"], period="5d", interval="5m",
+                                      cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE,
+                                      allowed_statuses=("ENTRY",))
+    assert len(entry_only_result.trades) == 0  # WATCH-only bars excluded
+
+
+def test_min_score_gate_filters_low_score_signals(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100, score=16.7),
+        _bar("2026-01-05 09:25", 101, 102, 100, 101, score=16.7),
+        _bar("2026-01-05 09:30", 108, 111, 107, 110, score=16.7),
+    ]
+    _patch_single_ticker(monkeypatch, "HHH", bars)
+    config = AutonomousConfig(allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0)
+
+    result = run_backtest(config, ["HHH"], period="5d", interval="5m",
+                           cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE, min_score=50.0)
+    assert len(result.trades) == 0
+    assert len(result.raw_signals) == 0
+
+
+def test_confirmation_bars_requires_signal_to_persist(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100),  # signal bar 1
+        _bar("2026-01-05 09:25", 101, 101, 101, 101),  # signal still true -> confirms
+        _bar("2026-01-05 09:30", 102, 102, 102, 102),  # entry fills here at open=102
+        _bar("2026-01-05 09:35", 108, 111, 107, 110),  # target hit
+    ]
+    _patch_single_ticker(monkeypatch, "III", bars)
+    config = AutonomousConfig(allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0)
+
+    result = run_backtest(config, ["III"], period="5d", interval="5m",
+                           cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE, confirmation_bars=1)
+    assert len(result.trades) == 1
+    assert result.trades[0].entry_price == 102.0
