@@ -28,13 +28,14 @@ _NO_COST = CostModel(
 
 
 def _bar(ts_str, o, h, l, c, status="ENTRY", direction="bullish", target1=110.0, invalidation=95.0,
-         score=80.0, reasons=None):
+         score=80.0, reasons=None, breakout_event=None, pullback_event=None):
     return {
         "timestamp": pd.Timestamp(ts_str, tz=IST),
         "open": o, "high": h, "low": l, "close": c,
         "confluence_status": status, "confluence_direction": direction,
         "confluence_score": score, "confluence_reasons": reasons or [],
         "target1": target1, "invalidation": invalidation,
+        "breakout_event": breakout_event, "pullback_event": pullback_event,
     }
 
 
@@ -46,7 +47,8 @@ def _patch_single_ticker(monkeypatch, ticker: str, bars: list[dict]):
         if base != ticker:
             return None
         out = df[["open", "high", "low", "close", "confluence_status", "confluence_direction",
-                  "confluence_score", "confluence_reasons", "target1", "invalidation"]].copy()
+                  "confluence_score", "confluence_reasons", "target1", "invalidation",
+                  "breakout_event", "pullback_event"]].copy()
         out["ticker"] = ticker
         out["timestamp"] = out.index
         return out.reset_index(drop=True)
@@ -209,3 +211,51 @@ def test_confirmation_bars_requires_signal_to_persist(monkeypatch):
                            cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE, confirmation_bars=1)
     assert len(result.trades) == 1
     assert result.trades[0].entry_price == 102.0
+
+
+def test_breakout_confirmation_entry_ignores_confluence_status(monkeypatch):
+    # confluence_status is NO TRADE throughout -- the D4 strategy must
+    # trigger purely off breakout_event, never off confluence at all.
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100, status="NO TRADE", direction=None,
+             breakout_event="CONFIRMED_BREAKOUT_BULLISH"),
+        _bar("2026-01-05 09:25", 101, 102, 100, 101, status="NO TRADE", direction=None),
+        _bar("2026-01-05 09:30", 108, 111, 107, 110, status="NO TRADE", direction=None),
+    ]
+    _patch_single_ticker(monkeypatch, "JJJ", bars)
+    config = AutonomousConfig(allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0)
+
+    confluence_result = run_backtest(config, ["JJJ"], period="5d", interval="5m",
+                                      cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE)
+    assert len(confluence_result.trades) == 0  # the current/default strategy never fires here
+
+    d4_result = run_backtest(config, ["JJJ"], period="5d", interval="5m",
+                              cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE,
+                              entry_strategy="breakout_confirmation")
+    assert len(d4_result.trades) == 1
+    assert d4_result.trades[0].entry_price == 101.0
+    assert d4_result.trades[0].strategy_version == "d4-breakout-confirmation"
+
+
+def test_pullback_retest_entry_ignores_confluence_status(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100, status="NO TRADE", direction=None,
+             pullback_event="PULLBACK_CONTINUATION_BULLISH"),
+        _bar("2026-01-05 09:25", 101, 102, 100, 101, status="NO TRADE", direction=None),
+        _bar("2026-01-05 09:30", 108, 111, 107, 110, status="NO TRADE", direction=None),
+    ]
+    _patch_single_ticker(monkeypatch, "KKK", bars)
+    config = AutonomousConfig(allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0)
+
+    d5_result = run_backtest(config, ["KKK"], period="5d", interval="5m",
+                              cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE,
+                              entry_strategy="pullback_retest")
+    assert len(d5_result.trades) == 1
+    assert d5_result.trades[0].entry_price == 101.0
+    assert d5_result.trades[0].strategy_version == "d5-pullback-retest"
+
+
+def test_unknown_entry_strategy_raises(monkeypatch):
+    config = AutonomousConfig(allocated_capital=20000.0)
+    with pytest.raises(ValueError):
+        run_backtest(config, [], entry_strategy="not-a-real-strategy")

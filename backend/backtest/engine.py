@@ -125,7 +125,8 @@ def _load_and_annotate(ticker: str, config: AutonomousConfig, period: str, inter
         logger.exception("Backtest data/pipeline load failed for %s", ticker)
         return None
     out = df[["open", "high", "low", "close", "confluence_status", "confluence_direction",
-              "confluence_score", "confluence_reasons", "target1", "invalidation"]].copy()
+              "confluence_score", "confluence_reasons", "target1", "invalidation",
+              "breakout_event", "pullback_event"]].copy()
     out["ticker"] = ticker
     out["timestamp"] = out.index
     return out.reset_index(drop=True)
@@ -166,15 +167,43 @@ def simulate(
     allowed_statuses: tuple[str, ...] = ("ENTRY", "WATCH"),
     min_score: float = 0.0,
     confirmation_bars: int = 0,
+    entry_strategy: str = "confluence",
 ) -> BacktestResult:
     """Run the entry/exit/risk simulation against already-fetched frames.
 
-    `allowed_statuses`, `min_score`, and `confirmation_bars` default to
-    EXACTLY the current live/baseline entry gate (status in ENTRY/WATCH, no
-    score minimum, fill on the very next bar) -- passing anything else is
-    an explicit, opt-in experiment, never the default path run_backtest()
-    takes.
+    `allowed_statuses`, `min_score`, `confirmation_bars`, and
+    `entry_strategy` default to EXACTLY the current live/baseline entry
+    gate (confluence status in ENTRY/WATCH, no score minimum, fill on the
+    very next bar) -- passing anything else is an explicit, opt-in
+    experiment, never the default path run_backtest() takes, and never
+    the current real-money strategy.
+
+    `entry_strategy` selects which signal triggers a candidate entry
+    (exits, risk, sizing, costs, slippage are identical across all three):
+      - "confluence" (default, CURRENT live strategy): status in
+        allowed_statuses, bullish, price between invalidation/target1.
+      - "breakout_confirmation" (D4, a genuinely separate strategy, never
+        combined with "confluence"): breakout_engine's own
+        CONFIRMED_BREAKOUT_BULLISH / BREAKOUT_RETEST_SUCCESS_BULLISH event
+        (already requires sufficient distance + volume expansion by that
+        engine's own rules), price between invalidation/target1.
+      - "pullback_retest" (D5, likewise separate): pullback_engine's own
+        PULLBACK_CONTINUATION_BULLISH event (impulse -> pullback to
+        support -> held with a bullish candle), price between
+        invalidation/target1.
+    All three reuse the SAME risk_engine target1/invalidation columns so
+    only the entry trigger varies -- a controlled comparison, not a new
+    risk model. Each still fills at the NEXT bar's open, never the signal
+    bar itself (no look-ahead), same as the default strategy.
     """
+    if entry_strategy not in ("confluence", "breakout_confirmation", "pullback_retest"):
+        raise ValueError(f"Unknown entry_strategy: {entry_strategy}")
+    strategy_version_tag = {
+        "confluence": STRATEGY_VERSION,
+        "breakout_confirmation": "d4-breakout-confirmation",
+        "pullback_retest": "d5-pullback-retest",
+    }[entry_strategy]
+
     no_new_entries_after = _parse_hhmm(config.no_new_entries_after)
     square_off_time = _parse_hhmm(config.square_off_time)
 
@@ -191,15 +220,22 @@ def simulate(
     events = events.reset_index(drop=True)
 
     # Diagnostics: the full raw-signal population meeting THIS experiment's
-    # status/score gate, independent of portfolio-level gating (see
+    # entry trigger, independent of portfolio-level gating (see
     # BacktestResult.raw_signals docstring).
-    raw_mask = (
-        events["confluence_status"].isin(list(allowed_statuses))
-        & (events["confluence_direction"] == "bullish")
-        & (events["invalidation"] < events["close"])
-        & (events["close"] < events["target1"])
-        & (events["confluence_score"] >= min_score)
-    )
+    price_band_mask = (events["invalidation"] < events["close"]) & (events["close"] < events["target1"])
+    if entry_strategy == "confluence":
+        raw_mask = (
+            events["confluence_status"].isin(list(allowed_statuses))
+            & (events["confluence_direction"] == "bullish")
+            & price_band_mask
+            & (events["confluence_score"] >= min_score)
+        )
+    elif entry_strategy == "breakout_confirmation":
+        raw_mask = events["breakout_event"].isin(
+            ["CONFIRMED_BREAKOUT_BULLISH", "BREAKOUT_RETEST_SUCCESS_BULLISH"]
+        ) & price_band_mask
+    else:  # pullback_retest
+        raw_mask = (events["pullback_event"] == "PULLBACK_CONTINUATION_BULLISH") & price_band_mask
     result.raw_signals = events.loc[raw_mask, ["ticker", "timestamp", "confluence_score", "confluence_status"]].to_dict("records")
 
     open_positions: dict[str, _OpenPosition] = {}
@@ -270,6 +306,7 @@ def simulate(
                     exit_reason=reason, gross_pnl=gross_pnl, costs=total_cost, net_pnl=net_pnl,
                     target1=position.target1, invalidation=position.invalidation,
                     signal_score=position.signal_score, confluence_reasons=position.confluence_reasons,
+                    strategy_version=strategy_version_tag,
                 ))
                 realized_pnl_today += net_pnl
                 equity += net_pnl
@@ -295,14 +332,22 @@ def simulate(
                 elapsed_min = (ts - last_closed_at[ticker]).total_seconds() / 60.0
                 cooldown_ok = elapsed_min >= config.cooldown_minutes
 
-            structural_ok = (
-                cooldown_ok
-                and row.confluence_status in allowed_statuses
-                and row.confluence_direction == "bullish"
-                and row.invalidation is not None and row.target1 is not None
+            price_band_ok = (
+                row.invalidation is not None and row.target1 is not None
                 and row.invalidation < row.close < row.target1
-                and row.confluence_score >= min_score
             )
+            if entry_strategy == "confluence":
+                signal_ok = (
+                    row.confluence_status in allowed_statuses
+                    and row.confluence_direction == "bullish"
+                    and row.confluence_score >= min_score
+                )
+            elif entry_strategy == "breakout_confirmation":
+                signal_ok = row.breakout_event in ("CONFIRMED_BREAKOUT_BULLISH", "BREAKOUT_RETEST_SUCCESS_BULLISH")
+            else:  # pullback_retest
+                signal_ok = row.pullback_event == "PULLBACK_CONTINUATION_BULLISH"
+
+            structural_ok = cooldown_ok and signal_ok and price_band_ok
 
             if confirmation_bars <= 0:
                 if structural_ok:
@@ -365,6 +410,7 @@ def run_backtest(
     allowed_statuses: tuple[str, ...] = ("ENTRY", "WATCH"),
     min_score: float = 0.0,
     confirmation_bars: int = 0,
+    entry_strategy: str = "confluence",
 ) -> BacktestResult:
     """Convenience wrapper: fetch + simulate in one call, with the exact
     current live/baseline entry gate by default. Prefer calling
@@ -375,4 +421,5 @@ def run_backtest(
     return simulate(
         frames, skipped, config, cost_model=cost_model, slippage_model=slippage_model,
         allowed_statuses=allowed_statuses, min_score=min_score, confirmation_bars=confirmation_bars,
+        entry_strategy=entry_strategy,
     )
