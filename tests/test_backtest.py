@@ -1,113 +1,159 @@
-"""Tests for Step 3: backtest realism."""
+"""Tests for the backtesting engine (backend/backtest/engine.py) and its
+metrics (backend/backtest/metrics.py).
+
+Monkeypatches load_from_yfinance + run_pipeline inside the engine module so
+these tests exercise the replay/risk/cost logic against crafted bars,
+without any real network call or real pipeline computation.
+"""
 
 from __future__ import annotations
+
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
-from backend.backtesting.backtest_engine import run_backtest
+from backend.autonomous.config import AutonomousConfig
+from backend.backtest.costs import CostModel, SlippageModel
+from backend.backtest.engine import run_backtest
+from backend.backtest.metrics import compute_metrics
+
+IST = ZoneInfo("Asia/Kolkata")
+
+_NO_SLIPPAGE = SlippageModel(entry_bps=0.0, exit_bps=0.0)
+_NO_COST = CostModel(
+    brokerage_flat=0.0, brokerage_pct=0.0, stt_sell_pct=0.0,
+    exchange_txn_pct=0.0, sebi_pct=0.0, stamp_duty_buy_pct=0.0, gst_pct=0.0,
+)
 
 
-def _make_entry_df():
-    idx = pd.date_range("2026-01-01", periods=20, freq="D")
-    data = {
-        "open": [100.0] * 20,
-        "high": [105.0] * 20,
-        "low": [95.0] * 20,
-        "close": [102.0] * 20,
-        "volume": [1000.0] * 20,
-        "status": ["NO TRADE"] * 20,
-        "direction": ["neutral"] * 20,
-        "entry_zone_low": [None] * 20,
-        "entry_zone_high": [None] * 20,
-        "target1": [None] * 20,
-        "invalidation": [None] * 20,
-        "atr": [5.0] * 20,
+def _bar(ts_str, o, h, l, c, status="ENTRY", direction="bullish", target1=110.0, invalidation=95.0):
+    return {
+        "timestamp": pd.Timestamp(ts_str, tz=IST),
+        "open": o, "high": h, "low": l, "close": c,
+        "confluence_status": status, "confluence_direction": direction,
+        "target1": target1, "invalidation": invalidation,
     }
-    df = pd.DataFrame(data, index=idx)
-    df.loc[df.index[5], "status"] = "ENTRY"
-    df.loc[df.index[5], "direction"] = "bullish"
-    df.loc[df.index[5], "entry_zone_high"] = 103.0
-    df.loc[df.index[5], "entry_zone_low"] = 99.0
-    df.loc[df.index[5], "target1"] = 110.0
-    df.loc[df.index[5], "invalidation"] = 95.0
-
-    for i in range(6, 12):
-        df.loc[df.index[i], "high"] = 115.0
-        df.loc[df.index[i], "low"] = 98.0
-    return df
 
 
-def test_backtest_defaults_preserve_behavior():
-    df = _make_entry_df()
-    metrics = run_backtest(df, brokerage_per_order=0, stt_percent=0, other_charges_percent=0)
-    assert metrics["total_trades"] == 1
-    assert metrics["wins"] == 1
-    assert metrics["average_cost_adjusted_return"] == metrics["average_return"]
+def _patch_single_ticker(monkeypatch, ticker: str, bars: list[dict]):
+    df = pd.DataFrame(bars).set_index("timestamp")
+
+    def _fake_load(ticker_arg, config, period, interval):
+        base = ticker_arg if "." not in ticker_arg else ticker_arg.split(".")[0]
+        if base != ticker:
+            return None
+        out = df[["open", "high", "low", "close", "confluence_status", "confluence_direction",
+                  "target1", "invalidation"]].copy()
+        out["ticker"] = ticker
+        out["timestamp"] = out.index
+        return out.reset_index(drop=True)
+
+    monkeypatch.setattr("backend.backtest.engine._load_and_annotate", _fake_load)
 
 
-def test_slippage_worsens_returns():
-    df = _make_entry_df()
-    metrics_slip = run_backtest(df, slippage_bps=50)
-    metrics_no_slip = run_backtest(df, slippage_bps=0)
-    assert len(metrics_slip["trades"]) == 1
-    assert metrics_slip["trades"][0]["return_pct"] < metrics_no_slip["trades"][0]["return_pct"]
+def test_entry_fills_next_bar_open_and_exits_on_target(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100),  # signal bar
+        _bar("2026-01-05 09:25", 101, 102, 100, 101),  # entry fills here at open=101
+        _bar("2026-01-05 09:30", 108, 111, 107, 110),  # high crosses target1=110 -> exit
+    ]
+    _patch_single_ticker(monkeypatch, "AAA", bars)
 
-
-def test_brokerage_reduces_net_return():
-    df = _make_entry_df()
-    metrics_no_cost = run_backtest(df, brokerage_per_order=0)
-    metrics_cost = run_backtest(df, brokerage_per_order=100, stt_percent=0.1, other_charges_percent=0.05)
-    assert len(metrics_cost["trades"]) == 1
-    assert metrics_cost["average_cost_adjusted_return"] < metrics_no_cost["average_return"]
-
-
-def test_position_sizing_changes_position_size():
-    df = _make_entry_df()
-    metrics = run_backtest(df, capital=100000, risk_per_trade_pct=1.0)
-    trade = metrics["trades"][0]
-    assert trade["position_size"] > 0
-    assert trade["return_abs"] == pytest.approx(
-        trade["return_pct"] / 100.0 * trade["entry_price"] * trade["position_size"],
-        abs=1e-2,
+    config = AutonomousConfig(
+        allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0,
+        max_open_positions=2, cooldown_minutes=0,
     )
+    result = run_backtest(config, ["AAA"], period="5d", interval="5m",
+                           cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE)
+
+    assert len(result.trades) == 1
+    trade = result.trades[0]
+    assert trade.entry_price == 101.0
+    assert trade.exit_price == 110.0
+    assert trade.exit_reason == "target_hit"
+    # Sized off the signal bar's close (100), per config.allocated_capital --
+    # not the (slightly higher) fill price on the next bar's open.
+    assert trade.quantity == 20000 // 100
+    assert trade.net_pnl > 0
 
 
-def test_trailing_stop_locks_profit():
-    idx = pd.date_range("2026-01-01", periods=20, freq="D")
-    data = {
-        "open": [100.0] * 20,
-        "high": [105.0] * 20,
-        "low": [98.0] * 20,
-        "close": [102.0] * 20,
-        "volume": [1000.0] * 20,
-        "status": ["NO TRADE"] * 20,
-        "direction": ["neutral"] * 20,
-        "entry_zone_low": [None] * 20,
-        "entry_zone_high": [None] * 20,
-        "target1": [None] * 20,
-        "invalidation": [None] * 20,
-        "atr": [5.0] * 20,
-    }
-    df = pd.DataFrame(data, index=idx)
-    df.loc[df.index[5], "status"] = "ENTRY"
-    df.loc[df.index[5], "direction"] = "bullish"
-    df.loc[df.index[5], "entry_zone_high"] = 103.0
-    df.loc[df.index[5], "entry_zone_low"] = 99.0
-    df.loc[df.index[5], "target1"] = 110.0
-    df.loc[df.index[5], "invalidation"] = 95.0
+def test_exit_on_invalidation(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100, target1=110.0, invalidation=95.0),
+        _bar("2026-01-05 09:25", 101, 101, 101, 101),
+        _bar("2026-01-05 09:30", 97, 98, 94, 96),  # low crosses invalidation=95 -> exit
+    ]
+    _patch_single_ticker(monkeypatch, "BBB", bars)
 
-    df.loc[df.index[10], "high"] = 108.0
-    df.loc[df.index[10], "low"] = 100.0
-    df.loc[df.index[11], "high"] = 108.0
-    df.loc[df.index[11], "low"] = 100.0
-    df.loc[df.index[11], "close"] = 100.0
+    config = AutonomousConfig(
+        allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0,
+    )
+    result = run_backtest(config, ["BBB"], period="5d", interval="5m",
+                           cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE)
 
-    for i in range(6, 10):
-        df.loc[df.index[i], "high"] = 106.0
-        df.loc[df.index[i], "low"] = 102.0
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == "invalidated"
+    assert result.trades[0].exit_price == 95.0
+    assert result.trades[0].net_pnl < 0
 
-    metrics = run_backtest(df, trailing_stop_bps=200)
+
+def test_square_off_forces_exit_regardless_of_target(monkeypatch):
+    bars = [
+        _bar("2026-01-05 14:50", 100, 100, 100, 100, target1=200.0, invalidation=10.0),
+        _bar("2026-01-05 14:55", 101, 102, 100, 101),
+        _bar("2026-01-05 15:15", 103, 104, 102, 103),  # past square-off time
+    ]
+    _patch_single_ticker(monkeypatch, "CCC", bars)
+
+    config = AutonomousConfig(allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0)
+    result = run_backtest(config, ["CCC"], period="5d", interval="5m",
+                           cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE)
+
+    assert len(result.trades) == 1
+    assert result.trades[0].exit_reason == "square_off"
+
+
+def test_capital_ceiling_caps_position_size_regardless_of_price(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 1000, 1000, 1000, 1000, target1=1100.0, invalidation=900.0),
+        _bar("2026-01-05 09:25", 1000, 1000, 1000, 1000),
+        _bar("2026-01-05 09:30", 1100, 1101, 1099, 1100),
+    ]
+    _patch_single_ticker(monkeypatch, "DDD", bars)
+
+    config = AutonomousConfig(
+        allocated_capital=5000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0,
+    )
+    result = run_backtest(config, ["DDD"], period="5d", interval="5m",
+                           cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE)
+
+    assert len(result.trades) == 1
+    # 5000 capital / 1000 price = 5 shares max, never more even though the
+    # trade would have been profitable at any size.
+    assert result.trades[0].quantity == 5
+
+
+def test_no_trades_when_universe_has_no_eligible_tickers(monkeypatch):
+    monkeypatch.setattr("backend.backtest.engine._load_and_annotate", lambda *a, **k: None)
+    config = AutonomousConfig(allocated_capital=20000.0)
+    result = run_backtest(config, ["ZZZ"], period="5d", interval="5m")
+    assert result.trades == []
+    assert "ZZZ" in result.skipped_tickers
+
+
+def test_compute_metrics_basic_shape(monkeypatch):
+    bars = [
+        _bar("2026-01-05 09:20", 100, 100, 100, 100),
+        _bar("2026-01-05 09:25", 101, 102, 100, 101),
+        _bar("2026-01-05 09:30", 108, 111, 107, 110),
+    ]
+    _patch_single_ticker(monkeypatch, "FFF", bars)
+    config = AutonomousConfig(allocated_capital=20000.0, max_capital_per_trade_pct=1.0, max_capital_per_trade_abs=0)
+    result = run_backtest(config, ["FFF"], period="5d", interval="5m",
+                           cost_model=_NO_COST, slippage_model=_NO_SLIPPAGE)
+    metrics = compute_metrics(result)
     assert metrics["total_trades"] == 1
-    assert metrics["trades"][0]["exit_reason"] == "invalid_hit"
-    assert metrics["trades"][0]["exit_price"] > 103.0
+    assert metrics["winning_trades"] == 1
+    assert metrics["win_rate"] == 1.0
+    assert metrics["net_profit"] > 0
