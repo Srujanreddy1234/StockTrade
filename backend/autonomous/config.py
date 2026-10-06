@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from backend.autonomous.universe import DEFAULT_UNIVERSE
+
 
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
@@ -45,6 +47,32 @@ class AutonomousConfig:
         )
     )
     exchange: str = os.environ.get("AUTOTRADE_EXCHANGE", "NSE")
+
+    # Full universe the scanner is allowed to pick candidates from. The
+    # watchlist above is only the day-1 starting point / fallback before the
+    # first scan completes -- once the scanner runs, trader.py's
+    # active_watchlist (not this static list) is what's actually ticked.
+    universe: list[str] = field(
+        default_factory=lambda: _env_list("AUTOTRADE_UNIVERSE", list(DEFAULT_UNIVERSE))
+    )
+    # How often (seconds) the scanner re-ranks the whole universe and
+    # refreshes the active watchlist. 30 min default: a stock's structural
+    # confluence setup doesn't flip every tick, so scanning dozens of
+    # tickers (each a real yfinance fetch + full pipeline run) every
+    # pipeline_refresh_seconds would be wasteful and could itself get rate
+    # limited.
+    scan_interval_seconds: float = _env_float("AUTOTRADE_SCAN_INTERVAL_SECONDS", 1800.0)
+    # Max number of scanner-selected tickers actively ticked at once, on top
+    # of (not instead of) any ticker with a currently open position, which is
+    # always kept in the active watchlist regardless of its latest scan rank
+    # so it keeps being monitored for exit until it's closed.
+    scan_top_n: int = _env_int("AUTOTRADE_SCAN_TOP_N", 6)
+    # Where the scanner's current picks are published so the read-only
+    # /autonomous/status endpoint (a separate process from the trading loop)
+    # can report the real active watchlist instead of the static fallback.
+    watchlist_state_path: str = os.environ.get(
+        "AUTOTRADE_WATCHLIST_STATE_PATH", "./autotrade_watchlist.json"
+    )
 
     # Loop timing.
     tick_interval_seconds: float = _env_float("AUTOTRADE_TICK_SECONDS", 1.0)

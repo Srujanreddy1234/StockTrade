@@ -1065,15 +1065,36 @@ def autonomous_status():
     (``python -m backend.autonomous.trader``) since it runs continuously and
     should not live inside a request/response cycle.
     """
+    import json
+
     from backend.autonomous.config import load_config
     from backend.autonomous.risk_manager import RiskManager
     from backend.groww.auth import is_real_trading_enabled
 
     config = load_config()
     risk = RiskManager(config)
+
+    # The scanner (backend/autonomous/scanner.py), running inside the
+    # trading loop process, publishes its current picks to this file -- see
+    # trader.py's _publish_watchlist_state. Fall back to the static config
+    # watchlist if the loop hasn't run a scan yet (or isn't running at all).
+    watchlist = config.watchlist
+    scan_info: dict | None = None
+    try:
+        with open(config.watchlist_state_path, "r") as f:
+            published = json.load(f)
+        watchlist = published.get("active_watchlist") or watchlist
+        scan_info = {
+            "scanned_at": published.get("scanned_at"),
+            "candidates": published.get("candidates"),
+        }
+    except Exception:
+        pass
+
     return {
         "mode": "live" if is_real_trading_enabled() else "paper",
-        "watchlist": config.watchlist,
+        "watchlist": watchlist,
+        "scan": scan_info,
         "tick_interval_seconds": config.tick_interval_seconds,
         "pipeline_refresh_seconds": config.pipeline_refresh_seconds,
         "buy_probability_threshold": config.buy_probability_threshold,

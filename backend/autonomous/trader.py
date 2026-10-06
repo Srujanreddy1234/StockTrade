@@ -29,7 +29,9 @@ to the autonomous_events table for audit purposes.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -38,6 +40,7 @@ from backend.autonomous.execution import ExecutionEngine
 from backend.autonomous.market_hours import is_market_open, new_entries_allowed, past_square_off
 from backend.autonomous.probability_engine import ProbabilitySignal, score as score_signal
 from backend.autonomous.risk_manager import RiskManager
+from backend.autonomous.scanner import ScanResult, scan_universe
 from backend.autonomous.tick_stats import TickerTickState, new_state
 from backend.data_engine.loader import load_from_yfinance
 from backend.db.engine import SessionLocal
@@ -88,14 +91,18 @@ class AutonomousTrader:
         self.config = config or load_config()
         self.risk = RiskManager(self.config)
         self.execution = ExecutionEngine(self.config)
-        self.tick_states: dict[str, TickerTickState] = {
-            t: new_state(self.config.rolling_window) for t in self.config.watchlist
-        }
-        self.pipeline_cache: dict[str, PipelineSnapshot] = {
-            t: PipelineSnapshot() for t in self.config.watchlist
-        }
-        self._last_observed_at: dict[str, float] = {t: 0.0 for t in self.config.watchlist}
+        # Day-1 fallback until the first scan completes; scan_universe()
+        # driven updates (see _rescan_universe_sync) are what actually
+        # decide which tickers get ticked once the loop is running.
+        self.active_watchlist: list[str] = list(self.config.watchlist)
+        self.tick_states: dict[str, TickerTickState] = {}
+        self.pipeline_cache: dict[str, PipelineSnapshot] = {}
+        self._last_observed_at: dict[str, float] = {}
+        for t in self.active_watchlist:
+            self._ensure_ticker_state(t)
         self._last_price_meta: dict[str, tuple[float, str]] = {}
+        self._last_scan_at = 0.0
+        self._last_scan_results: list[ScanResult] = []
         self.reconciliation = ReconciliationService(
             get_client(), price_tolerance_pct=self.config.reconciliation_price_tolerance_pct
         )
@@ -110,6 +117,85 @@ class AutonomousTrader:
 
     def stop(self) -> None:
         self._stop.set()
+
+    def _ensure_ticker_state(self, ticker: str) -> None:
+        """Lazily create per-ticker tick/pipeline state the first time a
+        ticker enters the active watchlist (either the day-1 fallback or a
+        later scanner pick) -- never reset for a ticker that's already
+        being tracked, so an in-progress tick/pipeline cache survives a
+        rescan that happens to pick the same ticker again.
+        """
+        if ticker not in self.tick_states:
+            self.tick_states[ticker] = new_state(self.config.rolling_window)
+        if ticker not in self.pipeline_cache:
+            self.pipeline_cache[ticker] = PipelineSnapshot()
+        if ticker not in self._last_observed_at:
+            self._last_observed_at[ticker] = 0.0
+
+    def _rescan_universe_sync(self) -> None:
+        """Re-rank the full universe and recompute the active watchlist.
+
+        A ticker with a currently open autonomous position is always kept
+        in the active list regardless of its latest scan rank -- dropping
+        it here would stop _tick_one from ever being called for it again,
+        which would silently stop monitoring it for exit/square-off. The
+        scanner only ever decides which ADDITIONAL tickers get a slot to
+        look for a fresh entry.
+        """
+        try:
+            results = scan_universe(self.config)
+        except Exception:
+            logger.exception("Universe scan failed; keeping previous active watchlist")
+            return
+
+        open_tickers = {
+            p["ticker"] for p in position_store.list_all()
+            if p["status"] == "open" and p.get("source") == "autonomous"
+        }
+        scanned_tickers = [r.ticker for r in results]
+        new_active = list(dict.fromkeys(scanned_tickers + list(open_tickers)))
+        if not new_active:
+            new_active = list(self.config.watchlist)
+
+        for ticker in new_active:
+            self._ensure_ticker_state(ticker)
+
+        self.active_watchlist = new_active
+        self._last_scan_results = results
+        self._last_scan_at = time.time()
+        logger.info(
+            "Universe scan complete: %d candidates, active watchlist now %s",
+            len(results), self.active_watchlist,
+        )
+        self._publish_watchlist_state(results, open_tickers)
+
+    def _publish_watchlist_state(self, results: list[ScanResult], open_tickers: set[str]) -> None:
+        """Write the scanner's current picks to a small JSON file so the
+        read-only HTTP API (a separate process from this loop) can report
+        the real active watchlist instead of the static config fallback.
+        Best-effort -- a write failure here must never affect trading.
+        """
+        payload = {
+            "scanned_at": time.time(),
+            "active_watchlist": self.active_watchlist,
+            "open_position_tickers": sorted(open_tickers),
+            "candidates": [
+                {
+                    "ticker": r.ticker,
+                    "confluence_score": r.confluence_score,
+                    "confluence_status": r.confluence_status,
+                    "last_price": r.last_price,
+                }
+                for r in results
+            ],
+        }
+        try:
+            tmp_path = f"{self.config.watchlist_state_path}.tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(payload, f, indent=2)
+            os.replace(tmp_path, self.config.watchlist_state_path)
+        except Exception:
+            logger.exception("Failed to publish watchlist state")
 
     def _fetch_ltp_sync(self, ticker: str) -> tuple[float, str] | None:
         """Returns (price, source) where source is "groww_ltp" (true live
@@ -627,6 +713,10 @@ class AutonomousTrader:
         await asyncio.to_thread(self._run_reconciliation, "startup")
         self._last_reconciliation_at = time.time()
 
+        # Initial scan before the first tick so the loop starts from the
+        # scanner's picks rather than the static day-1 fallback watchlist.
+        await asyncio.to_thread(self._rescan_universe_sync)
+
         while not self._stop.is_set():
             if not is_market_open(self.config):
                 await asyncio.sleep(30)
@@ -649,6 +739,9 @@ class AutonomousTrader:
                 await asyncio.to_thread(self._run_reconciliation, "periodic")
                 self._last_reconciliation_at = time.time()
 
+            if time.time() - self._last_scan_at > self.config.scan_interval_seconds:
+                await asyncio.to_thread(self._rescan_universe_sync)
+
             # Advance any order left non-terminal by a previous iteration
             # (bounded poll timeout, or a lost response marked UNKNOWN) --
             # this is what recovers state across a stuck request without
@@ -667,7 +760,7 @@ class AutonomousTrader:
 
             start = time.time()
             await asyncio.gather(
-                *(self._tick_one(t, available_margin) for t in self.config.watchlist)
+                *(self._tick_one(t, available_margin) for t in self.active_watchlist)
             )
             elapsed = time.time() - start
             await asyncio.sleep(max(0.0, self.config.tick_interval_seconds - elapsed))
