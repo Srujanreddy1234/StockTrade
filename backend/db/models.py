@@ -158,6 +158,15 @@ class AutonomousEventDB(Base):
     mode = Column(String, nullable=False, default="paper")  # paper | live
     order_id = Column(String, nullable=True)
     reason = Column(Text, nullable=True)
+    # Structured fields for candidate events (event_type="candidate"),
+    # added so paper/live signal observability doesn't depend on parsing
+    # the free-text `reason` -- see trader.py's _log_candidate.
+    confluence_score = Column(Float, nullable=True)
+    confluence_status = Column(String, nullable=True)
+    probability_threshold = Column(Float, nullable=True)
+    decision = Column(String, nullable=True)  # entered | rejected
+    rejection_reason = Column(String, nullable=True)
+    strategy_version = Column(String, nullable=True)
     __table_args__ = (
         {"sqlite_autoincrement": True},
     )

@@ -57,6 +57,11 @@ _ORDER_TERMINAL_STATES = (FILLED, PARTIALLY_FILLED, REJECTED, CANCELLED, FAILED)
 
 logger = logging.getLogger("autonomous.trader")
 
+# Reporting-only tag attached to every candidate/order event so later
+# analysis (and backend/backtest/engine.py's own STRATEGY_VERSION) can
+# trace which exact pipeline version produced a given decision.
+STRATEGY_VERSION = "v1-scanner+confluence+probability"
+
 
 @dataclass
 class PipelineSnapshot:
@@ -364,6 +369,51 @@ class AutonomousTrader:
         elif signal.ready:
             await self._maybe_enter(ticker, price, signal, snapshot, available_margin)
 
+    def _log_candidate(
+        self,
+        ticker: str,
+        price: float,
+        signal: ProbabilitySignal,
+        snapshot: PipelineSnapshot,
+        decision: str,
+        rejection_reason: str | None = None,
+    ) -> None:
+        """Every call to _maybe_enter represents one candidate evaluation
+        (it's only invoked when signal.ready and no position is already
+        open -- see _tick_one). This records that evaluation whether or
+        not it led to an order, including every field needed to later
+        check whether probability/score actually correlate with outcome
+        (Phase 2 of the paper-trading observability work) -- a rejected
+        candidate is exactly as important to keep as an accepted one.
+        """
+        risk_reward = None
+        if snapshot.target1 is not None and snapshot.invalidation is not None and price:
+            risk = price - snapshot.invalidation
+            reward = snapshot.target1 - price
+            if risk > 0:
+                risk_reward = round(reward / risk, 3)
+        log_event(
+            ticker=ticker,
+            event_type="candidate",
+            price=price,
+            buy_probability=signal.buy_probability,
+            sell_probability=signal.sell_probability,
+            mode=self.execution.mode,
+            confluence_score=snapshot.confluence_score,
+            confluence_status=snapshot.status,
+            probability_threshold=self.config.buy_probability_threshold,
+            decision=decision,
+            rejection_reason=rejection_reason,
+            strategy_version=STRATEGY_VERSION,
+            reason=(
+                f"decision={decision}"
+                + (f" ({rejection_reason})" if rejection_reason else "")
+                + f", confluence={snapshot.confluence_score}/{snapshot.status}, "
+                f"buy_probability={signal.buy_probability:.3f} (threshold={self.config.buy_probability_threshold}), "
+                f"stop={snapshot.invalidation}, target={snapshot.target1}, rr={risk_reward}"
+            ),
+        )
+
     async def _maybe_enter(
         self,
         ticker: str,
@@ -375,6 +425,7 @@ class AutonomousTrader:
         # Intraday-only: refuse a fresh entry once there isn't enough of the
         # session left to both enter and exit it safely before square-off.
         if not new_entries_allowed(self.config):
+            self._log_candidate(ticker, price, signal, snapshot, "rejected", "past_no_new_entries_cutoff")
             return
 
         structural_ok = (
@@ -384,7 +435,11 @@ class AutonomousTrader:
             and snapshot.invalidation is not None
             and snapshot.invalidation < price < snapshot.target1
         )
-        if not structural_ok or signal.buy_probability < self.config.buy_probability_threshold:
+        if not structural_ok:
+            self._log_candidate(ticker, price, signal, snapshot, "rejected", "structural_signal_not_eligible")
+            return
+        if signal.buy_probability < self.config.buy_probability_threshold:
+            self._log_candidate(ticker, price, signal, snapshot, "rejected", "probability_below_threshold")
             return
 
         # Persisted duplicate-order guard: survives a process restart because
@@ -392,6 +447,7 @@ class AutonomousTrader:
         # already-working BUY (any non-terminal state, including one left
         # UNKNOWN by a lost response) is never given a second one.
         if self.execution.has_in_flight_order(ticker, "BUY"):
+            self._log_candidate(ticker, price, signal, snapshot, "rejected", "duplicate_in_flight_order")
             return
 
         # A critical local-vs-broker mismatch on this ticker (local position
@@ -402,28 +458,18 @@ class AutonomousTrader:
         # regardless (see _tick_one), so this never stops a real position
         # from being managed, only from being added to.
         if ticker in self._critical_mismatch_tickers:
-            log_event(
-                ticker=ticker, event_type="skip", price=price, mode=self.execution.mode,
-                reason="blocked: unresolved broker reconciliation mismatch on this ticker",
-            )
+            self._log_candidate(ticker, price, signal, snapshot, "rejected", "broker_reconciliation_mismatch")
             return
 
         open_count = position_store.count_open(source="autonomous")
         can_open, reason = self.risk.can_open_new_position(ticker, open_count)
         if not can_open:
-            log_event(
-                ticker=ticker,
-                event_type="skip",
-                price=price,
-                buy_probability=signal.buy_probability,
-                sell_probability=signal.sell_probability,
-                mode=self.execution.mode,
-                reason=reason,
-            )
+            self._log_candidate(ticker, price, signal, snapshot, "rejected", f"risk_manager:{reason}")
             return
 
         quantity = self.risk.size_position(available_margin, price)
         if quantity <= 0:
+            self._log_candidate(ticker, price, signal, snapshot, "rejected", "zero_quantity_after_sizing")
             return
 
         if self.execution.mode == "live":
@@ -431,10 +477,7 @@ class AutonomousTrader:
                 self._pre_live_submission_checks, ticker, price, quantity
             )
             if not ok:
-                log_event(
-                    ticker=ticker, event_type="skip", price=price, mode=self.execution.mode,
-                    reason=f"blocked before live submission: {reason}",
-                )
+                self._log_candidate(ticker, price, signal, snapshot, "rejected", f"live_submission_blocked:{reason}")
                 return
 
         # decision_id ties this specific structural setup (identified by
@@ -450,6 +493,8 @@ class AutonomousTrader:
             "invalidation": snapshot.invalidation,
             "interval": self.config.candle_interval,
         }
+
+        self._log_candidate(ticker, price, signal, snapshot, "entered")
 
         try:
             order = await asyncio.to_thread(

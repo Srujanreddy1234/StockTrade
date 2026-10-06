@@ -17,6 +17,12 @@ _COLUMN_MIGRATIONS = [
     ("positions", "order_id", "VARCHAR"),
     ("positions", "initial_quantity", "INTEGER"),
     ("positions", "realized_pnl", "FLOAT NOT NULL DEFAULT 0.0"),
+    ("autonomous_events", "confluence_score", "FLOAT"),
+    ("autonomous_events", "confluence_status", "VARCHAR"),
+    ("autonomous_events", "probability_threshold", "FLOAT"),
+    ("autonomous_events", "decision", "VARCHAR"),
+    ("autonomous_events", "rejection_reason", "VARCHAR"),
+    ("autonomous_events", "strategy_version", "VARCHAR"),
 ]
 
 

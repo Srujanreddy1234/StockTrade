@@ -449,6 +449,12 @@ class AutonomousEventRepository:
             mode=payload.get("mode", "paper"),
             order_id=payload.get("order_id"),
             reason=payload.get("reason"),
+            confluence_score=payload.get("confluence_score"),
+            confluence_status=payload.get("confluence_status"),
+            probability_threshold=payload.get("probability_threshold"),
+            decision=payload.get("decision"),
+            rejection_reason=payload.get("rejection_reason"),
+            strategy_version=payload.get("strategy_version"),
         )
         self.db.add(record)
         self.db.commit()
@@ -476,4 +482,10 @@ class AutonomousEventRepository:
             "mode": record.mode,
             "order_id": record.order_id,
             "reason": record.reason,
+            "confluence_score": record.confluence_score,
+            "confluence_status": record.confluence_status,
+            "probability_threshold": record.probability_threshold,
+            "decision": record.decision,
+            "rejection_reason": record.rejection_reason,
+            "strategy_version": record.strategy_version,
         }
