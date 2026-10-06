@@ -117,4 +117,128 @@ def compute_metrics(result: BacktestResult) -> dict:
             round(float(np.percentile(daily_returns, 1)) * 100, 3) if daily_returns.size else None
         ),
         "skipped_tickers": result.skipped_tickers,
+        **holding_time_stats(result),
+        **capital_utilization_stats(result),
+        "average_drawdown": round(_average_drawdown(result), 2),
     }
+
+
+def _average_drawdown(result: "BacktestResult") -> float:
+    if not result.equity_curve:
+        return 0.0
+    peak = result.starting_capital
+    drawdowns = []
+    for _, eq in result.equity_curve:
+        peak = max(peak, eq)
+        drawdowns.append(peak - eq)
+    return float(np.mean(drawdowns))
+
+
+def holding_time_stats(result: "BacktestResult") -> dict:
+    if not result.trades:
+        return {"avg_holding_minutes": None, "median_holding_minutes": None, "max_holding_minutes": None}
+    holds = [(t.exit_time - t.entry_time).total_seconds() / 60.0 for t in result.trades]
+    return {
+        "avg_holding_minutes": round(float(np.mean(holds)), 1),
+        "median_holding_minutes": round(float(np.median(holds)), 1),
+        "max_holding_minutes": round(float(np.max(holds)), 1),
+    }
+
+
+def capital_utilization_stats(result: "BacktestResult") -> dict:
+    """Time-weighted deployed capital, from a sweep over each trade's
+    [entry_time, exit_time) interval. An approximation (treats a trade's
+    notional as constant and instantaneous at its boundaries) but gives a
+    reasonable read on how much of the capital ceiling was actually in use.
+    """
+    trades = result.trades
+    if not trades:
+        return {"max_capital_deployed": None, "capital_utilization_pct": None}
+
+    events = []
+    for t in trades:
+        notional = t.entry_price * t.quantity
+        events.append((t.entry_time, notional))
+        events.append((t.exit_time, -notional))
+    events.sort(key=lambda e: e[0])
+
+    deployed = 0.0
+    max_deployed = 0.0
+    weighted_sum = 0.0
+    prev_time = events[0][0]
+    for ts, delta in events:
+        weighted_sum += deployed * (ts - prev_time).total_seconds()
+        deployed += delta
+        max_deployed = max(max_deployed, deployed)
+        prev_time = ts
+    total_seconds = (events[-1][0] - events[0][0]).total_seconds()
+    avg_deployed = weighted_sum / total_seconds if total_seconds > 0 else max_deployed
+
+    return {
+        "max_capital_deployed": round(max_deployed, 2),
+        "capital_utilization_pct": round(avg_deployed / result.starting_capital * 100, 2),
+    }
+
+
+def breakdown_by_ticker(result: "BacktestResult") -> list[dict]:
+    by_ticker: dict = defaultdict(list)
+    for t in result.trades:
+        by_ticker[t.ticker].append(t.net_pnl)
+    rows = []
+    for ticker, pnls in sorted(by_ticker.items(), key=lambda kv: -sum(kv[1])):
+        wins = [p for p in pnls if p > 0]
+        losses = [p for p in pnls if p <= 0]
+        gross_profit = sum(wins)
+        gross_loss = -sum(losses)
+        rows.append({
+            "ticker": ticker,
+            "trades": len(pnls),
+            "win_rate": round(len(wins) / len(pnls), 3),
+            "net_pnl": round(sum(pnls), 2),
+            "profit_factor": round(gross_profit / gross_loss, 3) if gross_loss > 0 else None,
+            "avg_trade": round(sum(pnls) / len(pnls), 2),
+        })
+    return rows
+
+
+def breakdown_by_exit_reason(result: "BacktestResult") -> list[dict]:
+    by_reason: dict = defaultdict(list)
+    for t in result.trades:
+        by_reason[t.exit_reason].append(t.net_pnl)
+    rows = []
+    for reason, pnls in sorted(by_reason.items(), key=lambda kv: -sum(kv[1])):
+        rows.append({
+            "exit_reason": reason,
+            "trades": len(pnls),
+            "net_pnl": round(sum(pnls), 2),
+            "avg_trade": round(sum(pnls) / len(pnls), 2),
+            "win_rate": round(sum(1 for p in pnls if p > 0) / len(pnls), 3),
+        })
+    return rows
+
+
+_SCORE_BUCKETS = [(90, 101), (80, 90), (70, 80), (60, 70), (50, 60), (0, 50)]
+
+
+def breakdown_by_score_bucket(result: "BacktestResult") -> list[dict]:
+    rows = []
+    for lo, hi in _SCORE_BUCKETS:
+        bucket_trades = [
+            t for t in result.trades
+            if t.signal_score is not None and lo <= t.signal_score < hi
+        ]
+        if not bucket_trades:
+            continue
+        pnls = [t.net_pnl for t in bucket_trades]
+        wins = [p for p in pnls if p > 0]
+        rows.append({
+            "score_range": f"{lo}-{hi - 1}",
+            "trades": len(bucket_trades),
+            "win_rate": round(len(wins) / len(bucket_trades), 3),
+            "net_pnl": round(sum(pnls), 2),
+            "avg_trade": round(sum(pnls) / len(bucket_trades), 2),
+        })
+    missing_score = sum(1 for t in result.trades if t.signal_score is None)
+    if missing_score:
+        rows.append({"score_range": "unknown", "trades": missing_score, "note": "signal_score not recorded"})
+    return rows

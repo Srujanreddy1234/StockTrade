@@ -13,3 +13,4 @@ frontend/dist/
 
 # OS
 .DS_Store
+backtest_results/

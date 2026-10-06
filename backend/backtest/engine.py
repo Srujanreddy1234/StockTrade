@@ -44,6 +44,11 @@ from backend.pipeline import run_pipeline
 logger = logging.getLogger("backtest.engine")
 IST = ZoneInfo("Asia/Kolkata")
 
+# Reporting-only tag (never read by the decision logic below) so every
+# trade in the log can be traced to the exact entry/exit rules that
+# produced it, per the audit-trail requirement.
+STRATEGY_VERSION = "v1-scanner+confluence"
+
 
 def _parse_hhmm(value: str) -> dt_time:
     hh, mm = value.split(":")
@@ -69,6 +74,10 @@ class Trade:
     gross_pnl: float
     costs: float
     net_pnl: float
+    target1: float
+    invalidation: float
+    signal_score: float | None
+    strategy_version: str = STRATEGY_VERSION
 
 
 @dataclass
@@ -81,6 +90,7 @@ class _OpenPosition:
     invalidation: float
     buy_turnover: float
     buy_cost: float
+    signal_score: float | None
 
 
 @dataclass
@@ -103,7 +113,7 @@ def _load_and_annotate(ticker: str, config: AutonomousConfig, period: str, inter
         logger.exception("Backtest data/pipeline load failed for %s", ticker)
         return None
     out = df[["open", "high", "low", "close", "confluence_status", "confluence_direction",
-              "target1", "invalidation"]].copy()
+              "confluence_score", "target1", "invalidation"]].copy()
     out["ticker"] = ticker
     out["timestamp"] = out.index
     return out.reset_index(drop=True)
@@ -173,7 +183,7 @@ def run_backtest(
                 open_positions[ticker] = _OpenPosition(
                     ticker=ticker, entry_time=ts, entry_price=fill_price, quantity=quantity,
                     target1=intent["target1"], invalidation=intent["invalidation"],
-                    buy_turnover=turnover, buy_cost=buy_cost,
+                    buy_turnover=turnover, buy_cost=buy_cost, signal_score=intent.get("signal_score"),
                 )
 
         # 2) Manage an existing position: square-off, target, or
@@ -202,6 +212,8 @@ def run_backtest(
                     ticker=ticker, entry_time=position.entry_time, entry_price=position.entry_price,
                     exit_time=ts, exit_price=exit_price, quantity=position.quantity,
                     exit_reason=reason, gross_pnl=gross_pnl, costs=total_cost, net_pnl=net_pnl,
+                    target1=position.target1, invalidation=position.invalidation,
+                    signal_score=position.signal_score,
                 ))
                 realized_pnl_today += net_pnl
                 equity += net_pnl
@@ -243,6 +255,7 @@ def run_backtest(
                     pending_entries[ticker] = {
                         "target1": row.target1, "invalidation": row.invalidation,
                         "signal_time": ts, "quantity": quantity,
+                        "signal_score": row.confluence_score,
                     }
 
     return result

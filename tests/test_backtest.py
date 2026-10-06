@@ -27,11 +27,12 @@ _NO_COST = CostModel(
 )
 
 
-def _bar(ts_str, o, h, l, c, status="ENTRY", direction="bullish", target1=110.0, invalidation=95.0):
+def _bar(ts_str, o, h, l, c, status="ENTRY", direction="bullish", target1=110.0, invalidation=95.0, score=80.0):
     return {
         "timestamp": pd.Timestamp(ts_str, tz=IST),
         "open": o, "high": h, "low": l, "close": c,
         "confluence_status": status, "confluence_direction": direction,
+        "confluence_score": score,
         "target1": target1, "invalidation": invalidation,
     }
 
@@ -44,7 +45,7 @@ def _patch_single_ticker(monkeypatch, ticker: str, bars: list[dict]):
         if base != ticker:
             return None
         out = df[["open", "high", "low", "close", "confluence_status", "confluence_direction",
-                  "target1", "invalidation"]].copy()
+                  "confluence_score", "target1", "invalidation"]].copy()
         out["ticker"] = ticker
         out["timestamp"] = out.index
         return out.reset_index(drop=True)
