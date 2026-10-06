@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stocktrade.papertrader</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/srujanreddygangireddy/stocks/StockTrade/scripts/run_paper_trader.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/srujanreddygangireddy/stocks/StockTrade</string>
+
+    <!-- Defense in depth: even if run_paper_trader.sh is ever edited,
+         launchd itself still forces paper mode via this env var. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GROWW_ALLOW_REAL_ORDERS</key>
+        <string>false</string>
+    </dict>
+
+    <!-- Start on load (login) and restart automatically if it crashes --
+         but not if it exits cleanly via launchctl stop, so an explicit
+         stop stays stopped instead of being immediately relaunched. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/srujanreddygangireddy/stocks/StockTrade/backtest_results/_paper_run/launchd_stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/srujanreddygangireddy/stocks/StockTrade/backtest_results/_paper_run/launchd_stderr.log</string>
+</dict>
+</plist>
