@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 
 from backend.autonomous.config import AutonomousConfig, load_config
 from backend.autonomous.execution import ExecutionEngine
-from backend.autonomous.market_hours import is_market_open
+from backend.autonomous.market_hours import is_market_open, new_entries_allowed, past_square_off
 from backend.autonomous.probability_engine import ProbabilitySignal, score as score_signal
 from backend.autonomous.risk_manager import RiskManager
 from backend.autonomous.tick_stats import TickerTickState, new_state
@@ -286,6 +286,11 @@ class AutonomousTrader:
         snapshot: PipelineSnapshot,
         available_margin: float,
     ) -> None:
+        # Intraday-only: refuse a fresh entry once there isn't enough of the
+        # session left to both enter and exit it safely before square-off.
+        if not new_entries_allowed(self.config):
+            return
+
         structural_ok = (
             snapshot.status in ("ENTRY", "WATCH")
             and snapshot.direction == "bullish"
@@ -390,7 +395,11 @@ class AutonomousTrader:
 
     async def _maybe_exit(self, ticker: str, price: float, signal: ProbabilitySignal, position: dict) -> None:
         reason = None
-        if price >= position["target1"]:
+        if past_square_off(self.config):
+            # Intraday square-off overrides everything else -- this
+            # position is closing regardless of target/stop/signal state.
+            reason = "square_off"
+        elif price >= position["target1"]:
             reason = "target_hit"
         elif price <= position["invalidation"]:
             reason = "invalidated"
@@ -400,6 +409,11 @@ class AutonomousTrader:
         if reason is None:
             return
 
+        await self._exit_position(ticker, price, position, reason, signal)
+
+    async def _exit_position(
+        self, ticker: str, price: float, position: dict, reason: str, signal: ProbabilitySignal | None = None,
+    ) -> None:
         quantity = int(position.get("quantity") or 0)
         if quantity <= 0:
             return
@@ -436,13 +450,32 @@ class AutonomousTrader:
             ticker=ticker,
             event_type="order_submitted",
             price=price,
-            buy_probability=signal.buy_probability,
-            sell_probability=signal.sell_probability,
+            buy_probability=signal.buy_probability if signal else None,
+            sell_probability=signal.sell_probability if signal else None,
             mode=order["mode"],
             order_id=order.get("broker_order_id") or order["id"],
             reason=f"status={order['status']}, exit_reason={reason}",
         )
         self._finalize_order(order)
+
+    async def _force_square_off(self) -> None:
+        """Called every loop iteration once past_square_off() is true.
+        Closes every still-open autonomous position regardless of which
+        ticker is in the active watchlist tick cycle, using the last known
+        price for each (a fresh LTP fetch isn't worth the complexity here --
+        the order itself is MARKET, so the actual fill price is whatever
+        the broker gives, not this estimate).
+        """
+        for position in position_store.list_all():
+            if position["status"] != "open" or position.get("source") != "autonomous":
+                continue
+            ticker = position["ticker"]
+            state = self.tick_states.get(ticker)
+            price = state.last_price if state else None
+            if price is None:
+                fetched = await asyncio.to_thread(self._fetch_ltp_sync, ticker)
+                price = fetched[0] if fetched else position["entry_price"]
+            await self._exit_position(ticker, price, position, "square_off")
 
     def _finalize_order(self, order: dict) -> None:
         """Apply a (possibly just-reconciled) order's confirmed fill to the
@@ -602,10 +635,15 @@ class AutonomousTrader:
             available_margin = await asyncio.to_thread(self.execution.get_available_margin)
             self.risk.ensure_day_started(available_margin)
 
+            # NOTE: the kill-switch is checked (and new entries blocked by
+            # it) inside _maybe_enter via risk.can_open_new_position() --
+            # it deliberately does NOT short-circuit this loop iteration,
+            # because doing so used to also skip _maybe_exit for every
+            # ticker, silently preventing target/stop exits (and now
+            # square-off) from running on a kill-switched day. A kill
+            # switch must stop new risk, never trap an existing position.
             if self.risk.check_kill_switch():
                 logger.warning("Kill switch active: %s", self.risk.state.kill_switch_reason)
-                await asyncio.sleep(self.config.tick_interval_seconds)
-                continue
 
             if time.time() - self._last_reconciliation_at > self.config.reconciliation_interval_seconds:
                 await asyncio.to_thread(self._run_reconciliation, "periodic")
@@ -621,6 +659,11 @@ class AutonomousTrader:
             for order in advanced:
                 if order.get("status") in _ORDER_TERMINAL_STATES:
                     self._finalize_order(order)
+
+            if past_square_off(self.config):
+                await self._force_square_off()
+                await asyncio.sleep(self.config.tick_interval_seconds)
+                continue
 
             start = time.time()
             await asyncio.gather(

@@ -83,9 +83,16 @@ class RiskManager:
     def _save(self) -> None:
         self.state.save(self.config.state_path)
 
+    def _capped(self, available_margin: float) -> float:
+        """Never treat more than config.allocated_capital as usable, no
+        matter how much is actually sitting in the real account -- this is
+        the operator-agreed ceiling, not the account balance.
+        """
+        return min(available_margin, self.config.allocated_capital)
+
     def ensure_day_started(self, available_margin: float) -> None:
         if self.state.day_start_margin is None:
-            self.state.day_start_margin = available_margin
+            self.state.day_start_margin = self._capped(available_margin)
             self._save()
 
     def record_realized_pnl(self, amount: float) -> None:
@@ -135,7 +142,7 @@ class RiskManager:
         return open_position_count < self.config.max_open_positions
 
     def max_trade_value(self, available_margin: float) -> float:
-        pct_cap = available_margin * self.config.max_capital_per_trade_pct
+        pct_cap = self._capped(available_margin) * self.config.max_capital_per_trade_pct
         if self.config.max_capital_per_trade_abs > 0:
             return min(pct_cap, self.config.max_capital_per_trade_abs)
         return pct_cap

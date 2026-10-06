@@ -60,14 +60,22 @@ class AutonomousConfig:
     sell_probability_threshold: float = _env_float("AUTOTRADE_SELL_THRESHOLD", 0.65)
 
     # --- Risk guardrails (non-negotiable; all enabled by default) ---
-    # Max fraction of available margin risked on any single trade.
+    # Hard ceiling on how much capital the bot is ALLOWED to treat as its
+    # own, regardless of how much is actually sitting in the real Groww
+    # account. Every risk calculation below (position sizing, daily loss
+    # limit) uses min(actual available margin, this ceiling) as its base --
+    # so a larger real account balance never silently increases what the
+    # bot is willing to risk. This is the number the operator actually
+    # agreed to let the bot trade with.
+    allocated_capital: float = _env_float("AUTOTRADE_ALLOCATED_CAPITAL", 20000.0)
+    # Max fraction of (capped) available margin risked on any single trade.
     max_capital_per_trade_pct: float = _env_float("AUTOTRADE_MAX_CAPITAL_PCT", 0.05)
     # Absolute rupee cap per trade, applied on top of the percentage cap
     # (whichever is smaller wins). 0 disables the absolute cap.
     max_capital_per_trade_abs: float = _env_float("AUTOTRADE_MAX_CAPITAL_ABS", 10000.0)
     # Daily loss kill-switch: stop opening new positions once cumulative
     # realized + unrealized loss for the day crosses this fraction of the
-    # margin snapshot taken at day start.
+    # (capped) margin snapshot taken at day start.
     daily_loss_limit_pct: float = _env_float("AUTOTRADE_DAILY_LOSS_LIMIT_PCT", 0.03)
     # Max number of concurrent open autonomous positions.
     max_open_positions: int = _env_int("AUTOTRADE_MAX_OPEN_POSITIONS", 3)
@@ -78,7 +86,14 @@ class AutonomousConfig:
     # simple and guarantees the fill happens; slippage risk is accepted and
     # bounded by the position-sizing cap above.
     order_type: str = os.environ.get("AUTOTRADE_ORDER_TYPE", "MARKET")
-    product: str = os.environ.get("AUTOTRADE_PRODUCT", "CNC")
+    # MIS = intraday (margin product, must be squared off same day -- Groww
+    # itself auto-squares-off MIS positions near close if this bot somehow
+    # didn't, which is an extra safety net on top of our own square-off
+    # logic below, not a substitute for it). CNC = delivery, can carry
+    # overnight. Defaults to MIS because this bot force-closes every
+    # position before market close either way (see square_off_time) --
+    # holding a CNC (delivery) position overnight was never the intent.
+    product: str = os.environ.get("AUTOTRADE_PRODUCT", "MIS")
     order_validity: str = os.environ.get("AUTOTRADE_ORDER_VALIDITY", "DAY")
     order_segment: str = os.environ.get("AUTOTRADE_ORDER_SEGMENT", "CASH")
 
@@ -119,6 +134,18 @@ class AutonomousConfig:
     # hours is refused regardless of signals.
     market_open: str = os.environ.get("AUTOTRADE_MARKET_OPEN", "09:15")
     market_close: str = os.environ.get("AUTOTRADE_MARKET_CLOSE", "15:20")
+
+    # --- Intraday square-off (this bot is intraday-only: see `product`
+    # above). Two separate cutoffs, both IST: ---
+    # No NEW entries are opened at or after this time -- there isn't enough
+    # of the session left to both enter and exit a fresh position safely.
+    no_new_entries_after: str = os.environ.get("AUTOTRADE_NO_NEW_ENTRIES_AFTER", "15:00")
+    # Every still-open autonomous position is force-closed (MARKET sell,
+    # through the same confirmed-fill order pipeline as any other exit) at
+    # or after this time, regardless of target/invalidation/signal state.
+    # This is what actually guarantees "cash, not a stock position" by the
+    # end of the day.
+    square_off_time: str = os.environ.get("AUTOTRADE_SQUARE_OFF_TIME", "15:15")
 
     # Kill-switch state file (survives process restarts within a trading day).
     state_path: str = os.environ.get("AUTOTRADE_STATE_PATH", "./autotrade_state.json")

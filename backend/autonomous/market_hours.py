@@ -28,3 +28,22 @@ def is_market_open(config: AutonomousConfig, now: datetime | None = None) -> boo
     open_t = _parse_hhmm(config.market_open)
     close_t = _parse_hhmm(config.market_close)
     return open_t <= now.time() <= close_t
+
+
+def new_entries_allowed(config: AutonomousConfig, now: datetime | None = None) -> bool:
+    """False once it's too late in the session to safely open AND exit a
+    fresh intraday position before square-off. Independent of
+    is_market_open() -- the market can still be open while this is False.
+    """
+    now = (now or datetime.now(IST)).astimezone(IST)
+    cutoff = _parse_hhmm(config.no_new_entries_after)
+    return now.time() < cutoff
+
+
+def past_square_off(config: AutonomousConfig, now: datetime | None = None) -> bool:
+    """True once every open intraday position must be force-closed,
+    regardless of target/stop/signal state.
+    """
+    now = (now or datetime.now(IST)).astimezone(IST)
+    cutoff = _parse_hhmm(config.square_off_time)
+    return now.time() >= cutoff
